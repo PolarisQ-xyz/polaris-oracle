@@ -432,7 +432,7 @@ the trade, which isn't recoverable later.
 ## Bugs found by pressure-testing this system
 
 <details>
-<summary><strong>Fifteen real bugs</strong>, surfaced by deliberately trying to break this system after it was "done," not just written once and left. Click to expand.</summary>
+<summary><strong>Sixteen real bugs</strong>, surfaced by deliberately trying to break this system after it was "done," not just written once and left. Click to expand.</summary>
 
 1. **Every sponsored trade call was missing its own address.** `wireArgs`
    only ever carried what the frontend explicitly passed — the wallet's
@@ -563,6 +563,39 @@ the trade, which isn't recoverable later.
     (`CDY746GOZPAQ7RBY6EYYQZPKYQ7V2O2GTKNLM337QXW4DSRCV4XRX5RT`) created
     against the live Fly deployment with a strike price read straight from
     Reflector's live testnet price.
+16. **A production `ORACLE_SECRET_KEY` rotation silently broke every
+    future automated market creation, for three weeks, with no alert.**
+    The deployed key was rotated to a fresh, Fly-only identity for a real
+    security reason (so an accidentally-echoed local dev key could never
+    threaten production) — but the capital-efficiency vault's `admin` was
+    set once, at its own `initialize()` call, under the *old* key, and
+    `contracts/vault` has no admin-rotation entrypoint at all (see
+    `polaris-contracts`'s README, "The capital-efficiency vault"). Every
+    `MarketFactoryService` sweep since the rotation called
+    `vaultWithdraw` and failed with on-chain `Error(Contract, #4)`
+    (`Unauthorized`) — logged every 5 minutes, but nothing surfaces a
+    repeating background-timer failure to a human, so it ran unnoticed
+    until a routine check of the live site found zero open markets and a
+    three-week-old cancelled one. Compounded by a second, independent
+    problem found in the same investigation: the old vault's balance had
+    also drained to 2 XLM, far under the 100 XLM the factory withdraws
+    per market — withdrawal would have failed on balance alone even with
+    correct auth. Fixed by deploying a fresh vault instance
+    (`CDAZVYBSONMRKSXILQGYWIMDHIAWNWISBOEEPU6EG7RUBJPGHP6VZZBW`)
+    initialized with the *current* production key as admin and funded
+    with 2,000 XLM, then repointing `VAULT_CONTRACT` at it — preserving
+    the original key-separation security rationale rather than reverting
+    it. No code regression test is possible for this one (it's a
+    deployed-instance/config mismatch, not a code defect), so the lesson
+    is captured here and in the contracts README instead: **rotating
+    `ORACLE_SECRET_KEY` in production requires redeploying the vault
+    too, every time**, since the two are permanently coupled by the
+    vault's own lack of an admin-rotation function. Verified live,
+    unprompted: the very next scheduled sweep after the fix deployed
+    created a real market
+    (`CB2QHU6BTQ76IX4J2OVB7EVAUAYLR2ZUSIUITIQF4CC7OVLDY5GDQZ3Z`) with no
+    manual trigger, and the new vault's balance dropped by exactly the
+    configured withdrawal amount.
 
 </details>
 
