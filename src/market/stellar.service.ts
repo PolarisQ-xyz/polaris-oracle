@@ -441,6 +441,25 @@ export class StellarService {
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
 
+  /**
+   * `contracts/market`'s second settlement path — no Lazer payload, finalizes
+   * against Reflector's live on-chain price alone (unanimous with RedStone
+   * too, if configured). Added when Pyth's public Lazer access moved behind
+   * a paid subscription (see `MarketService.trySettle`'s doc comment for
+   * where this is actually called from). Only exists on markets deployed
+   * from the wasm shipped alongside this change or later — a market
+   * created from an older wasm has no `settle_via_reflector` function at
+   * all, and this call fails with a plain "function not found" rather than
+   * a typed contract error; `MarketService` treats that the same as any
+   * other settle failure (falls through to the cancel fallback).
+   */
+  async settleViaReflector(contractId: string): Promise<string> {
+    const client = this.marketClient(contractId);
+    const tx = await this.withRpcRetry(() => (client as any).settle_via_reflector());
+    const sent = await tx.signAndSend();
+    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
+  }
+
   async cancel(contractId: string): Promise<string> {
     const client = this.marketClient(contractId);
     const tx = await this.withRpcRetry(() => (client as any).cancel());

@@ -31,14 +31,18 @@ curl https://polaris-oracle.fly.dev/perpetuals
 The web app consuming this API is at
 [polaris-frontend-delta.vercel.app](https://polaris-frontend-delta.vercel.app).
 
-> **Live-deployment caveat, stated plainly**: this instance has no real
-> `PYTH_LAZER_TOKEN` configured (none was available to generate one against
-> for this build) — the same limitation local dev has always had. Every
-> market on the live instance therefore settles via the permissionless
-> `cancel()` fallback at grace expiry rather than a genuine Lazer-verified
-> `settle()`. The settlement *logic* itself is fully covered by unit tests
-> and was verified live against the mock Lazer verifier during development
-> — see [Bugs found by pressure-testing this system](#bugs-found-by-pressure-testing-this-system).
+> **Live-deployment note**: this instance has no `PYTH_LAZER_TOKEN`
+> configured — Pyth's public Lazer access now requires a paid subscription
+> ($500/month minimum), which this deployment doesn't have. That no longer
+> means every market just refunds, though: settlement uses
+> `settle_via_reflector` instead — a second, genuinely real contract
+> entrypoint backed by Reflector Network's live on-chain price, with the
+> same fail-closed discipline as a Lazer-verified `settle()`. See [Design
+> notes](#design-notes) for how it works, and
+> `polaris-contracts`'s README for the contract-level design. The
+> permissionless `cancel()` liveness backstop still exists underneath it
+> for the cases even Reflector can't cover (a market deployed before this
+> path existed, or Reflector itself being unavailable).
 
 ## Contents
 
@@ -203,18 +207,19 @@ header.
 cp .env.example .env   # fill in ORACLE_SECRET_KEY, ADMIN_API_KEY at minimum
 npm install
 npm run start:dev      # http://localhost:3001
-npm test                # 130 unit tests
+npm test                # 131 unit tests
 ```
 
 `ORACLE_SECRET_KEY` is the only hard requirement to boot — everything else
-degrades gracefully (no `PYTH_LAZER_TOKEN` → markets fall back to
-permissionless `cancel` at grace expiry instead of settling; no admin key
-→ every admin route rejects, per `AdminGuard`'s fail-closed design).
+degrades gracefully (no `PYTH_LAZER_TOKEN` → markets settle via
+`settle_via_reflector` instead of a Lazer-verified `settle()`, falling
+back further to permissionless `cancel` only if that also fails; no admin
+key → every admin route rejects, per `AdminGuard`'s fail-closed design).
 
 ## Testing
 
 ```sh
-npm test          # jest — 121 unit tests across 24 suites
+npm test          # jest — 131 unit tests across 27 suites
 npm run lint
 ```
 
@@ -378,6 +383,37 @@ token-gated `OracleService`: a hand-built Lazer payload agreeing with both
 Reflector and the mock RedStone succeeded and recorded the checkpoint; a
 second attempt with the mock deliberately diverging correctly rejected
 with `OracleDivergence`.
+
+### Settling without a Lazer token: `settle_via_reflector`
+
+Pyth's public Lazer access moved behind a paid subscription ($500/month
+minimum) after this project was first built — `oracle.isAvailable` being
+`false` used to mean every market's only possible outcome was a refund via
+`cancel()`. It doesn't anymore. `MarketService.trySettle` now tries the
+contract's `settle_via_reflector()` entrypoint first whenever the Lazer
+oracle is unavailable: a genuinely independent settlement path backed by
+Reflector Network's live on-chain price directly, not merely corroborating
+against something else — see `polaris-contracts`'s README for the full
+contract-level design and why it's a separate entrypoint rather than an
+`Option<Bytes>` branch on `settle` itself.
+
+`StellarService.settleViaReflector` calls it the same way `settle` calls
+the Lazer path — same `contract.Client`, same `withRpcRetry` wrapping. The
+one real difference in `trySettle`: this attempt has no retry loop of its
+own (unlike the Lazer path's `SETTLE_RETRY_ATTEMPTS`), since Reflector's
+own staleness window is already generous relative to a market's grace
+period — a failure here goes straight to `reconcileWithChain` (in case it
+actually succeeded on-chain despite a reporting hiccup) and then the
+`cancel()` liveness backstop, the same honest fallback chain every other
+settle failure in this codebase already uses.
+
+**Only reaches markets deployed from the current wasm.** A classic market
+created before this shipped has no `settle_via_reflector` function on its
+deployed contract at all (deployed wasm is immutable) — calling it fails
+with a plain RPC "function not found," which `trySettle` treats exactly
+like any other settle failure: falls through to `cancel()`. Nothing
+silently breaks; older markets just keep behaving exactly as they always
+did.
 
 ### Off-chain multi-oracle settlement cross-check (Pyth-internal)
 
@@ -624,8 +660,15 @@ signature is `Result<T, Error>`, `tx.result` is `Ok`/`Err`, not `T` — call
   oracles configured" indicator) is a deferred follow-up.
 - `POST /perpetuals/:id/checkpoint` is admin-triggered, not scheduled —
   nothing calls it automatically.
-- The live Fly deployment has no real `PYTH_LAZER_TOKEN` — see the caveat
-  at the top of this document.
+- The live Fly deployment has no real `PYTH_LAZER_TOKEN` — settles via
+  `settle_via_reflector` instead, see the caveat at the top of this
+  document.
+- `settle_via_reflector` only exists on classic markets deployed from the
+  wasm shipped alongside it or later (deployed wasm is immutable) —
+  `MarketService` treats an older market's missing function the same as
+  any other settle failure and falls through to the `cancel()` liveness
+  backstop. Perpetuals have no equivalent gap: they never settle at all,
+  only `terminate()`, which needs no oracle.
 
 ## Contributing
 

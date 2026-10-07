@@ -75,23 +75,61 @@ describe('MarketService — settlement orchestration', () => {
     expect(stellar.cancel).not.toHaveBeenCalled();
   });
 
-  it('never strands funds: falls straight to cancel when the oracle is unavailable', async () => {
+  it('settles via Reflector when the oracle is unavailable and the Reflector-only path succeeds', async () => {
+    // No Lazer payload at all (no PYTH_LAZER_TOKEN configured) no longer
+    // means an automatic refund — the contract's Reflector-only
+    // settle_via_reflector path is tried first, and a market really can
+    // resolve YES/NO from it, same as a genuine Lazer-verified settle.
+    const repo = makeRepo();
+    const stellar = {
+      settle: jest.fn(),
+      cancel: jest.fn(),
+      settleViaReflector: jest.fn().mockResolvedValue('REFLECTORTX'),
+    };
+    const oracle = { isAvailable: false, waitForUpdate: jest.fn() };
+    const svc = new MarketService(repo, stellar as any, oracle as any, {} as ConfigService, new MarketEvents(), makeActivity());
+
+    const m = svc.watch(sample());
+    await flushMicrotasks();
+
+    expect(stellar.settleViaReflector).toHaveBeenCalledWith('CCONTRACT1');
+    expect(stellar.settle).not.toHaveBeenCalled();
+    expect(svc.get(m.contractId)?.status).toBe('settled');
+    expect(svc.get(m.contractId)?.settleTxHash).toBe('REFLECTORTX');
+    expect(stellar.cancel).not.toHaveBeenCalled();
+  });
+
+  it('never strands funds: falls back to cancel when the oracle is unavailable and the Reflector-only settle also fails', async () => {
+    // Covers e.g. a market deployed from a wasm older than
+    // settle_via_reflector's existence, or Reflector itself being
+    // unavailable/stale/divergent — the cancel liveness backstop must
+    // still be there underneath the new path, not replaced by it.
     jest.useFakeTimers();
     try {
       const repo = makeRepo();
-      const stellar = { settle: jest.fn(), cancel: jest.fn().mockResolvedValue('CANCELTX') };
+      const stellar = {
+        settle: jest.fn(),
+        cancel: jest.fn().mockResolvedValue('CANCELTX'),
+        settleViaReflector: jest.fn().mockRejectedValue(new Error('settle_via_reflector not found on this contract')),
+        getMarketState: jest.fn().mockRejectedValue(new Error('rpc down')),
+      };
       const oracle = { isAvailable: false, waitForUpdate: jest.fn() };
       const svc = new MarketService(repo, stellar as any, oracle as any, {} as ConfigService, new MarketEvents(), makeActivity());
 
       const m = sample({ gracePeriodSecs: 60 });
       svc.watch(m);
-      await flushMicrotasks();
+      // reconcileWithChain retries its (also-failing) getMarketState read
+      // 3 times, 750ms apart, before giving up and falling through — the
+      // async variant interleaves microtask flushing between each timer
+      // fire, needed since each retry's delay is only scheduled after the
+      // previous attempt's promise rejection has already been handled.
+      await jest.advanceTimersByTimeAsync(3 * 750);
 
+      expect(stellar.settleViaReflector).toHaveBeenCalledWith('CCONTRACT1');
       expect(stellar.settle).not.toHaveBeenCalled();
       expect(svc.get(m.contractId)?.status).toBe('watching'); // fallback scheduled, not yet fired
 
-      jest.advanceTimersByTime(60_000 + 1000);
-      await flushMicrotasks();
+      await jest.advanceTimersByTimeAsync(60_000 + 1000);
 
       expect(stellar.cancel).toHaveBeenCalledWith('CCONTRACT1');
       expect(svc.get(m.contractId)?.status).toBe('cancelled');

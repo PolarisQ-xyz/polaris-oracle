@@ -24,12 +24,15 @@ export interface SignedPriceUpdate {
  * (`isAvailable`), and resolve the first signed price update for a feed
  * once subscribed.
  *
- * `isAvailable` starts `false` until the pool actually connects. Every
- * caller in `MarketService` treats "oracle unavailable" as a first-class,
- * expected state (fall back to `cancel`), not an error — a market must
- * still resolve to a full refund if `PYTH_LAZER_TOKEN` is missing or Pyth
- * is down, which is the whole point of the contract's permissionless
- * `cancel` path.
+ * `isAvailable` starts `false` until the pool actually connects.
+ * `MarketService.trySettle` treats "oracle unavailable" as a first-class,
+ * expected state, not an error — but no longer means an automatic refund:
+ * it tries the contract's Reflector-only `settle_via_reflector` path
+ * first (real, price-verified settlement with no Lazer token needed —
+ * see that method's doc comment), only falling through to the
+ * permissionless `cancel` liveness backstop if that itself fails (a
+ * market old enough to predate `settle_via_reflector` existing on its
+ * deployed wasm, or Reflector itself being unavailable/stale/divergent).
  */
 @Injectable()
 export class OracleService implements OnModuleInit, OnModuleDestroy {
@@ -47,7 +50,7 @@ export class OracleService implements OnModuleInit, OnModuleDestroy {
   async onModuleInit(): Promise<void> {
     const token = this.config.get<string>('pythLazerToken');
     if (!token) {
-      this.logger.warn('PYTH_LAZER_TOKEN not set — settlement will fall back to cancel() at grace expiry');
+      this.logger.warn('PYTH_LAZER_TOKEN not set — settlement will use settle_via_reflector (Reflector-only, no Lazer payload) instead');
       return;
     }
 

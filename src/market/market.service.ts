@@ -141,9 +141,28 @@ export class MarketService implements OnModuleInit {
     if (this.isTerminal(m.status)) return;
 
     if (!this.oracle.isAvailable) {
-      this.logger.warn(`oracle unavailable — scheduling cancel fallback for ${m.contractId}`);
-      this.scheduleCancelFallback(m);
-      return;
+      // No Lazer payload to settle with at all (no PYTH_LAZER_TOKEN
+      // configured) — try the contract's Reflector-only settlement path
+      // before giving up to the cancel fallback. This is a genuine second
+      // settlement route, not a weaker one dressed up as equivalent: it
+      // still fails closed on a stale/unavailable/disagreeing oracle, the
+      // same discipline the Lazer path holds itself to. See
+      // StellarService.settleViaReflector's doc comment for why this can
+      // itself fail outright on an older market (deployed before this
+      // function existed on the contract) — that's an expected, handled
+      // case here, not a bug.
+      try {
+        const txHash = await this.stellar.settleViaReflector(m.contractId);
+        this.persist(m, { status: 'settled', settleTxHash: txHash, lastError: undefined });
+        this.logger.log(`settled ${m.contractId} via Reflector (no Lazer token configured) in tx ${txHash}`);
+        return;
+      } catch (err) {
+        const message = (err as Error).message;
+        if (await this.reconcileWithChain(m)) return;
+        this.logger.warn(`Reflector-only settle failed for ${m.contractId}, falling back to cancel: ${message}`);
+        this.scheduleCancelFallback(m);
+        return;
+      }
     }
 
     for (let attempt = 1; attempt <= SETTLE_RETRY_ATTEMPTS; attempt++) {
