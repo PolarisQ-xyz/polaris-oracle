@@ -415,6 +415,15 @@ like any other settle failure: falls through to `cancel()`. Nothing
 silently breaks; older markets just keep behaving exactly as they always
 did.
 
+**Verified live on the real deployment, not just in unit tests**: created
+a real short-lived market (`CAEP37S5PBNHRNQF2ME53GAU4Q3LUXZJ75WXKQVESRLHRAO5ZPRPBJ2E`,
+150s expiry) against the live Fly instance (no `PYTH_LAZER_TOKEN`
+configured there), let the background timer fire with zero manual
+intervention, and confirmed it resolved `status: "settled"` with a real
+`settleTxHash` — not the old `cancelled` refund. On-chain state read back
+`status: "ResolvedYes"`, `finalPrice: "20"`, matching Reflector's actual
+live price (20¢) read independently moments before creating the market.
+
 ### Off-chain multi-oracle settlement cross-check (Pyth-internal)
 
 "Redundant multi-oracle" here means a **Pyth-internal cross-check** (Lazer
