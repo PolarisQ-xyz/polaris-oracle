@@ -150,6 +150,71 @@ export function buildReflectorConfigArg(
 }
 
 /**
+ * Typed method shapes for each deployed contract's `contract.Client`,
+ * hand-written against the real Rust signatures in `polaris-contracts`
+ * (cross-checked against each `pub fn` there, not guessed) — matches the
+ * SDK's own generated-client convention: each method takes one args object
+ * (named per the Rust parameter names) and returns
+ * `Promise<AssembledTransaction<T>>`/`Promise<SentTransaction<T>>`, where
+ * `T` is `Result<U>` for a Rust fn declared `-> Result<U, Error>` (needs
+ * `.unwrap()`, throws on `Err`) or plain `U` for one that isn't.
+ *
+ * Only the methods this backend actually calls through `StellarService`
+ * are listed — `buy`/`sell`/`split`/`merge`/`transfer`/`redeem` go through
+ * the sponsored-relay path (`wire-args.ts`'s generic, contract-agnostic
+ * `xdr.ScVal` builder) instead, never through a typed method here.
+ *
+ * This is the one place per contract that needs to trust the SDK's runtime
+ * dispatch matches what's declared here — `buildClient` below does the
+ * corresponding cast exactly once per contract, so every call site after
+ * that point is a real, checked method call instead of an `any`.
+ */
+interface MarketContractMethods {
+  get_market(): Promise<StellarContract.AssembledTransaction<StellarContract.Result<RawOnChainMarket>>>;
+  get_position(args: { addr: string }): Promise<StellarContract.AssembledTransaction<[bigint, bigint]>>;
+  get_price(): Promise<StellarContract.AssembledTransaction<StellarContract.Result<[number, number]>>>;
+  get_fee(): Promise<StellarContract.AssembledTransaction<StellarContract.Result<number>>>;
+  settle(args: { payload: Buffer }): Promise<StellarContract.AssembledTransaction<StellarContract.Result<void>>>;
+  settle_via_reflector(): Promise<StellarContract.AssembledTransaction<StellarContract.Result<void>>>;
+  cancel(): Promise<StellarContract.AssembledTransaction<StellarContract.Result<void>>>;
+}
+
+interface PerpetualContractMethods {
+  get_market(): Promise<StellarContract.AssembledTransaction<StellarContract.Result<RawOnChainPerpetual>>>;
+  get_position(args: { addr: string }): Promise<StellarContract.AssembledTransaction<[bigint, bigint]>>;
+  get_price(): Promise<StellarContract.AssembledTransaction<StellarContract.Result<[number, number]>>>;
+  get_fee(): Promise<StellarContract.AssembledTransaction<StellarContract.Result<number>>>;
+  terminate(args: { admin: string }): Promise<StellarContract.AssembledTransaction<StellarContract.Result<void>>>;
+  record_price_checkpoint(args: {
+    payload: Buffer;
+  }): Promise<StellarContract.AssembledTransaction<StellarContract.Result<void>>>;
+}
+
+/** The mock's own `set_price` has no `#[contracterror]` enum at all (see its doc comment in `polaris-contracts`) — a plain `()` return, not `Result<(), Error>`, unlike every real contract's writes above. */
+interface MockRedstoneContractMethods {
+  set_price(args: { price: bigint; timestamp: bigint }): Promise<StellarContract.AssembledTransaction<void>>;
+}
+
+interface FactoryContractMethods {
+  deploy(args: { public_key: Buffer }): Promise<StellarContract.AssembledTransaction<StellarContract.Result<string>>>;
+  initialize(args: {
+    admin: string;
+    wasm_hash: Buffer;
+  }): Promise<StellarContract.AssembledTransaction<StellarContract.Result<void>>>;
+  resolve(args: { public_key: Buffer }): Promise<StellarContract.AssembledTransaction<string>>;
+}
+
+interface VaultContractMethods {
+  get_balance(): Promise<StellarContract.AssembledTransaction<StellarContract.Result<bigint>>>;
+  get_total_deposited(): Promise<StellarContract.AssembledTransaction<StellarContract.Result<bigint>>>;
+  withdraw(args: {
+    admin: string;
+    to: string;
+    amount: bigint;
+  }): Promise<StellarContract.AssembledTransaction<StellarContract.Result<void>>>;
+}
+
+/**
  * All Stellar/Soroban I/O lives here: reads (via RPC simulation, no fee, no
  * signature), oracle-authorized writes (settle/cancel/wallet deploy, signed
  * by this process's own keypair via `contract.Client`), market deployment
@@ -229,64 +294,52 @@ export class StellarService {
     };
   }
 
-  private marketClient(contractId: string) {
-    return new StellarContract.Client(marketSpec, {
+  /**
+   * One client builder for every contract this service talks to, instead
+   * of a near-identical copy per contract (five of them used to exist here,
+   * differing only in which `Spec` was passed — plus a sixth inline copy in
+   * `terminatePerpetual`, differing only in which keypair signs). `signer`
+   * defaults to the always-hot `keypair` (settle/cancel/vault calls/wallet
+   * deploys); `terminatePerpetual` is the one caller that passes
+   * `deployerKeypair` instead, mirroring `deployMarket`'s own admin-identity
+   * split.
+   *
+   * The cast is the one necessary "trust the SDK/spec" assertion this file
+   * needs — `contract.Client`'s plain constructor (built from a pre-parsed
+   * `Spec`, not the async `fromWasm<T>`/`fromWasmHash<T>` factories) has no
+   * typed variant, so this is where that gap gets bridged, once, instead of
+   * at every call site.
+   */
+  private buildClient<T>(spec: StellarContract.Spec, contractId: string, signer: Keypair = this.keypair) {
+    return new StellarContract.Client(spec, {
       contractId,
       networkPassphrase: this.networkPassphrase,
       rpcUrl: this.rpcUrl,
       allowHttp: this.rpcUrl.startsWith('http://'),
-      publicKey: this.keypair.publicKey(),
-      signTransaction: this.keypair as unknown as StellarContract.ClientOptions['signTransaction'],
+      publicKey: signer.publicKey(),
+      signTransaction: signer as unknown as StellarContract.ClientOptions['signTransaction'],
       server: this.server,
-    });
+    }) as unknown as StellarContract.Client & T;
+  }
+
+  private marketClient(contractId: string) {
+    return this.buildClient<MarketContractMethods>(marketSpec, contractId);
   }
 
   private perpetualClient(contractId: string) {
-    return new StellarContract.Client(perpetualSpec, {
-      contractId,
-      networkPassphrase: this.networkPassphrase,
-      rpcUrl: this.rpcUrl,
-      allowHttp: this.rpcUrl.startsWith('http://'),
-      publicKey: this.keypair.publicKey(),
-      signTransaction: this.keypair as unknown as StellarContract.ClientOptions['signTransaction'],
-      server: this.server,
-    });
+    return this.buildClient<PerpetualContractMethods>(perpetualSpec, contractId);
   }
 
   private mockRedstoneClient(contractId: string) {
-    return new StellarContract.Client(mockRedstoneSpec, {
-      contractId,
-      networkPassphrase: this.networkPassphrase,
-      rpcUrl: this.rpcUrl,
-      allowHttp: this.rpcUrl.startsWith('http://'),
-      publicKey: this.keypair.publicKey(),
-      signTransaction: this.keypair as unknown as StellarContract.ClientOptions['signTransaction'],
-      server: this.server,
-    });
+    return this.buildClient<MockRedstoneContractMethods>(mockRedstoneSpec, contractId);
   }
 
   private factoryClient(contractId: string) {
-    return new StellarContract.Client(factorySpec, {
-      contractId,
-      networkPassphrase: this.networkPassphrase,
-      rpcUrl: this.rpcUrl,
-      allowHttp: this.rpcUrl.startsWith('http://'),
-      publicKey: this.keypair.publicKey(),
-      signTransaction: this.keypair as unknown as StellarContract.ClientOptions['signTransaction'],
-      server: this.server,
-    });
+    return this.buildClient<FactoryContractMethods>(factorySpec, contractId);
   }
 
   private vaultClient(contractId: string) {
-    return new StellarContract.Client(vaultSpec, {
-      contractId,
-      networkPassphrase: this.networkPassphrase,
-      rpcUrl: this.rpcUrl,
-      allowHttp: this.rpcUrl.startsWith('http://'),
-      publicKey: this.keypair.publicKey(),
-      signTransaction: this.keypair as unknown as StellarContract.ClientOptions['signTransaction'],
-      server: this.server,
-    });
+    return this.buildClient<VaultContractMethods>(vaultSpec, contractId);
   }
 
   /**
@@ -307,7 +360,7 @@ export class StellarService {
    * (`reconcileWithChain` is how `MarketService` already handles that for
    * settle/cancel specifically; blindly retrying here could double-submit).
    */
-  private async withRpcRetry(fn: () => Promise<any>): Promise<any> {
+  private async withRpcRetry<T>(fn: () => Promise<T>): Promise<T> {
     let lastErr: unknown;
     for (let attempt = 1; attempt <= RPC_RETRY_ATTEMPTS; attempt++) {
       try {
@@ -328,55 +381,55 @@ export class StellarService {
 
   async getMarketState(contractId: string): Promise<OnChainMarket> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => (client as any).get_market());
-    return normalizeMarket(tx.result.unwrap() as RawOnChainMarket);
+    const tx = await this.withRpcRetry(() => client.get_market());
+    return normalizeMarket(tx.result.unwrap());
   }
 
   async getPosition(contractId: string, address: string): Promise<[bigint, bigint]> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => (client as any).get_position({ addr: address }));
-    return tx.result as [bigint, bigint];
+    const tx = await this.withRpcRetry(() => client.get_position({ addr: address }));
+    return tx.result;
   }
 
   async getPrice(contractId: string): Promise<{ yesBps: number; noBps: number }> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => (client as any).get_price());
-    const [yesBps, noBps] = tx.result.unwrap() as [number, number];
+    const tx = await this.withRpcRetry(() => client.get_price());
+    const [yesBps, noBps] = tx.result.unwrap();
     return { yesBps, noBps };
   }
 
   /** Current effective swap fee (bps) per the market's volume-scaled fee curve — see `get_fee` in the contract. */
   async getFee(contractId: string): Promise<number> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => (client as any).get_fee());
-    return tx.result.unwrap() as number;
+    const tx = await this.withRpcRetry(() => client.get_fee());
+    return tx.result.unwrap();
   }
 
   // ---------- perpetual reads (simulated, no fee, no signature) ----------
 
   async getPerpetualState(contractId: string): Promise<OnChainPerpetual> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry(() => (client as any).get_market());
-    return normalizePerpetual(tx.result.unwrap() as RawOnChainPerpetual);
+    const tx = await this.withRpcRetry(() => client.get_market());
+    return normalizePerpetual(tx.result.unwrap());
   }
 
   async getPerpetualPosition(contractId: string, address: string): Promise<[bigint, bigint]> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry(() => (client as any).get_position({ addr: address }));
-    return tx.result as [bigint, bigint];
+    const tx = await this.withRpcRetry(() => client.get_position({ addr: address }));
+    return tx.result;
   }
 
   async getPerpetualPrice(contractId: string): Promise<{ yesBps: number; noBps: number }> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry(() => (client as any).get_price());
-    const [yesBps, noBps] = tx.result.unwrap() as [number, number];
+    const tx = await this.withRpcRetry(() => client.get_price());
+    const [yesBps, noBps] = tx.result.unwrap();
     return { yesBps, noBps };
   }
 
   async getPerpetualFee(contractId: string): Promise<number> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry(() => (client as any).get_fee());
-    return tx.result.unwrap() as number;
+    const tx = await this.withRpcRetry(() => client.get_fee());
+    return tx.result.unwrap();
   }
 
   /**
@@ -388,16 +441,8 @@ export class StellarService {
    * `require_auth()` against whichever key actually holds that role.
    */
   async terminatePerpetual(contractId: string): Promise<string> {
-    const client = new StellarContract.Client(perpetualSpec, {
-      contractId,
-      networkPassphrase: this.networkPassphrase,
-      rpcUrl: this.rpcUrl,
-      allowHttp: this.rpcUrl.startsWith('http://'),
-      publicKey: this.deployerKeypair.publicKey(),
-      signTransaction: this.deployerKeypair as unknown as StellarContract.ClientOptions['signTransaction'],
-      server: this.server,
-    });
-    const tx = await this.withRpcRetry(() => (client as any).terminate({ admin: this.deployerKeypair.publicKey() }));
+    const client = this.buildClient<PerpetualContractMethods>(perpetualSpec, contractId, this.deployerKeypair);
+    const tx = await this.withRpcRetry(() => client.terminate({ admin: this.deployerKeypair.publicKey() }));
     const sent = await tx.signAndSend();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
@@ -419,7 +464,7 @@ export class StellarService {
     const client = this.mockRedstoneClient(contractId);
     const price = priceCents * 10n ** BigInt(decimals - 2);
     const timestamp = BigInt(Math.floor(Date.now() / 1000));
-    const tx = await this.withRpcRetry(() => (client as any).set_price({ price, timestamp }));
+    const tx = await this.withRpcRetry(() => client.set_price({ price, timestamp }));
     const sent = await tx.signAndSend();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
@@ -427,7 +472,7 @@ export class StellarService {
   /** Permissionless at the contract level (see `record_price_checkpoint`'s own doc comment in `polaris-contracts`) — signed here by this process's own keypair purely because *some* account has to pay the fee, same as `settle`/`cancel`. */
   async recordPriceCheckpoint(contractId: string, payload: Buffer): Promise<string> {
     const client = this.perpetualClient(contractId);
-    const tx = await this.withRpcRetry(() => (client as any).record_price_checkpoint({ payload }));
+    const tx = await this.withRpcRetry(() => client.record_price_checkpoint({ payload }));
     const sent = await tx.signAndSend();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
@@ -436,7 +481,7 @@ export class StellarService {
 
   async settle(contractId: string, payload: Buffer): Promise<string> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => (client as any).settle({ payload }));
+    const tx = await this.withRpcRetry(() => client.settle({ payload }));
     const sent = await tx.signAndSend();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
@@ -455,14 +500,14 @@ export class StellarService {
    */
   async settleViaReflector(contractId: string): Promise<string> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => (client as any).settle_via_reflector());
+    const tx = await this.withRpcRetry(() => client.settle_via_reflector());
     const sent = await tx.signAndSend();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
 
   async cancel(contractId: string): Promise<string> {
     const client = this.marketClient(contractId);
-    const tx = await this.withRpcRetry(() => (client as any).cancel());
+    const tx = await this.withRpcRetry(() => client.cancel());
     const sent = await tx.signAndSend();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
@@ -483,9 +528,9 @@ export class StellarService {
    */
   async deployWallet(factoryContractId: string, publicKey: Buffer): Promise<string> {
     const client = this.factoryClient(factoryContractId);
-    const tx = await this.withRpcRetry(() => (client as any).deploy({ public_key: publicKey }));
+    const tx = await this.withRpcRetry(() => client.deploy({ public_key: publicKey }));
     const sent = await tx.signAndSend();
-    return (sent.result as { unwrap: () => string }).unwrap();
+    return sent.result.unwrap();
   }
 
   /**
@@ -498,10 +543,10 @@ export class StellarService {
   async initializeFactory(factoryContractId: string, walletWasmHash: Buffer): Promise<string> {
     const client = this.factoryClient(factoryContractId);
     const tx = await this.withRpcRetry(() =>
-      (client as any).initialize({ admin: this.oraclePublicKey, wasm_hash: walletWasmHash }),
+      client.initialize({ admin: this.oraclePublicKey, wasm_hash: walletWasmHash }),
     );
     const sent = await tx.signAndSend();
-    (sent.result as { unwrap: () => void }).unwrap();
+    sent.result.unwrap();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
 
@@ -516,8 +561,8 @@ export class StellarService {
    */
   async resolveWallet(factoryContractId: string, publicKey: Buffer): Promise<string> {
     const client = this.factoryClient(factoryContractId);
-    const tx = await this.withRpcRetry(() => (client as any).resolve({ public_key: publicKey }));
-    return tx.result as string;
+    const tx = await this.withRpcRetry(() => client.resolve({ public_key: publicKey }));
+    return tx.result;
   }
 
   // ---------- capital-efficiency vault ----------
@@ -531,29 +576,29 @@ export class StellarService {
   /** Available capital, in stroops — checked before `MarketFactoryService` withdraws to seed a new market, so an underfunded vault fails loudly instead of a partial/confusing on-chain error. */
   async vaultBalance(vaultContractId: string): Promise<bigint> {
     const client = this.vaultClient(vaultContractId);
-    const tx = await this.withRpcRetry(() => (client as any).get_balance());
-    return (tx.result as { unwrap: () => bigint }).unwrap();
+    const tx = await this.withRpcRetry(() => client.get_balance());
+    return tx.result.unwrap();
   }
 
   /** Lifetime deposits, in stroops — always `>= vaultBalance` (this v1 vault has no LP-share accounting yet, see the contract's own doc comment). Powers the admin dashboard's Treasury view. */
   async vaultTotalDeposited(vaultContractId: string): Promise<bigint> {
     const client = this.vaultClient(vaultContractId);
-    const tx = await this.withRpcRetry(() => (client as any).get_total_deposited());
-    return (tx.result as { unwrap: () => bigint }).unwrap();
+    const tx = await this.withRpcRetry(() => client.get_total_deposited());
+    return tx.result.unwrap();
   }
 
   /** Moves `amount` stroops from the vault to this process's own account, to fund a new market's `initial_liquidity` — the same account `deployMarket` already transfers that liquidity from. */
   async vaultWithdraw(vaultContractId: string, amount: bigint): Promise<string> {
     const client = this.vaultClient(vaultContractId);
     const tx = await this.withRpcRetry(() =>
-      (client as any).withdraw({
+      client.withdraw({
         admin: this.oraclePublicKey,
         to: this.oraclePublicKey,
         amount,
       }),
     );
     const sent = await tx.signAndSend();
-    (sent.result as { unwrap: () => void }).unwrap();
+    sent.result.unwrap();
     return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
 
