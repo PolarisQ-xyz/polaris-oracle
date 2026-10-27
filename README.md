@@ -29,7 +29,7 @@ curl https://polaris-oracle-api.fly.dev/perpetuals
 ```
 
 The web app consuming this API is at
-[polaris-frontend-delta.vercel.app](https://polaris-frontend-delta.vercel.app).
+[polaris-frontend-iota.vercel.app](https://polaris-frontend-iota.vercel.app).
 
 > **Live-deployment note**: this instance has no `PYTH_LAZER_TOKEN`
 > configured — Pyth's public Lazer access now requires a paid subscription
