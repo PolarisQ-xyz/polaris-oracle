@@ -1,7 +1,7 @@
 # polaris-oracle
 
-[![CI](https://github.com/only1dreamgene/polaris-oracle/actions/workflows/ci.yml/badge.svg)](https://github.com/only1dreamgene/polaris-oracle/actions/workflows/ci.yml)
-[![Fly Deploy](https://github.com/only1dreamgene/polaris-oracle/actions/workflows/fly-deploy.yml/badge.svg)](https://github.com/only1dreamgene/polaris-oracle/actions/workflows/fly-deploy.yml)
+[![CI](https://github.com/PolarisQ-xyz/polaris-oracle/actions/workflows/ci.yml/badge.svg)](https://github.com/PolarisQ-xyz/polaris-oracle/actions/workflows/ci.yml)
+[![Fly Deploy](https://github.com/PolarisQ-xyz/polaris-oracle/actions/workflows/fly-deploy.yml/badge.svg)](https://github.com/PolarisQ-xyz/polaris-oracle/actions/workflows/fly-deploy.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 NestJS settlement automation, multi-oracle price relay, and gasless
@@ -15,17 +15,17 @@ This is one of three repos that make up Polaris:
 
 | Repo | Role |
 |---|---|
-| [polaris-contracts](https://github.com/only1dreamgene/polaris-contracts) | The on-chain rules: markets, perpetuals, the LP vault, passkey wallets |
+| [polaris-contracts](https://github.com/PolarisQ-xyz/polaris-contracts) | The on-chain rules: markets, perpetuals, the LP vault, passkey wallets |
 | **polaris-oracle** (this repo) | The backend — this document |
-| [polaris-frontend](https://github.com/only1dreamgene/polaris-frontend) | Next.js web app — trading UI, portfolio, embeddable widget, admin dashboard |
+| [polaris-frontend](https://github.com/PolarisQ-xyz/polaris-frontend) | Next.js web app — trading UI, portfolio, embeddable widget, admin dashboard |
 
 ## Live
 
-**API**: [`https://polaris-oracle.fly.dev`](https://polaris-oracle.fly.dev) — deployed on Fly.io, auto-deployed on every push to `main`.
+**API**: [`https://polaris-oracle-api.fly.dev`](https://polaris-oracle-api.fly.dev) — deployed on Fly.io, auto-deployed on every push to `main`.
 
 ```sh
-curl https://polaris-oracle.fly.dev/markets
-curl https://polaris-oracle.fly.dev/perpetuals
+curl https://polaris-oracle-api.fly.dev/markets
+curl https://polaris-oracle-api.fly.dev/perpetuals
 ```
 
 The web app consuming this API is at
@@ -134,7 +134,7 @@ flowchart LR
 
 ## API reference
 
-All endpoints are relative to `https://polaris-oracle.fly.dev` (or
+All endpoints are relative to `https://polaris-oracle-api.fly.dev` (or
 `http://localhost:3001` locally). Admin endpoints require an `x-admin-key`
 header.
 
