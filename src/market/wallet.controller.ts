@@ -57,6 +57,26 @@ export class WalletController {
     return { address };
   }
 
+  /**
+   * Spendable native-XLM balance, in stroops, for any wallet address —
+   * passkey or email-custodial, same shape either way since both are
+   * ordinary smart-wallet contract instances. Powers the header's balance
+   * display next to a signed-in wallet; free (a simulated SEP-41 `balance`
+   * read), not a transaction.
+   */
+  @Get('balance')
+  async balance(@Query('address') address: string) {
+    if (!address) {
+      throw new BadRequestException('address query param is required');
+    }
+    const nativeXlmSac = this.config.get<string>('nativeXlmSac');
+    if (!nativeXlmSac) {
+      throw new BadRequestException('NATIVE_XLM_SAC must be configured to read wallet balances');
+    }
+    const balanceStroops = await this.stellar.tokenBalance(nativeXlmSac, address);
+    return { balanceStroops: balanceStroops.toString() };
+  }
+
   @Post('deploy')
   async deploy(@Req() req: Request, @Body() dto: DeployWalletDto) {
     if (!this.deployRateLimiter.tryConsume(req.ip ?? 'unknown')) {

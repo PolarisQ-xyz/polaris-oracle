@@ -587,6 +587,38 @@ export class StellarService {
     return tx.result.unwrap();
   }
 
+  // ---------- SEP-41 token balances ----------
+  //
+  // Unlike every other client above, a SAC (Stellar Asset Contract — e.g.
+  // the native XLM token) has no locally-vendored WASM/spec to build a
+  // typed client from: it's a built-in, not something `polaris-contracts`
+  // compiles. `contract.Client.from` fetches the SAC's standard spec
+  // straight off the ledger instead, so this is the one client builder in
+  // this file that isn't backed by `buildClient`.
+
+  /**
+   * A wallet's spendable collateral balance, in stroops — what the
+   * frontend shows next to a signed-in wallet's address, and what
+   * `email-auth.service.ts`'s best-effort faucet funding is trying to make
+   * nonzero on first login. Read-only SEP-41 `balance(id)`; no signer
+   * needed, `oraclePublicKey` is only the simulation's source account.
+   */
+  async tokenBalance(tokenContractId: string, holderAddress: string): Promise<bigint> {
+    const client = await StellarContract.Client.from({
+      contractId: tokenContractId,
+      networkPassphrase: this.networkPassphrase,
+      rpcUrl: this.rpcUrl,
+      allowHttp: this.rpcUrl.startsWith('http://'),
+      publicKey: this.keypair.publicKey(),
+    });
+    const tx = await this.withRpcRetry(() =>
+      (client as unknown as { balance(args: { id: string }): Promise<StellarContract.AssembledTransaction<bigint>> }).balance({
+        id: holderAddress,
+      }),
+    );
+    return tx.result;
+  }
+
   /** Moves `amount` stroops from the vault to this process's own account, to fund a new market's `initial_liquidity` — the same account `deployMarket` already transfers that liquidity from. */
   async vaultWithdraw(vaultContractId: string, amount: bigint): Promise<string> {
     const client = this.vaultClient(vaultContractId);
