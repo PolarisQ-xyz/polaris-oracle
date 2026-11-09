@@ -33,10 +33,14 @@ export interface EmailWalletAssertion {
  *   secp256r1_verify(public_key, digest, signature)
  *   client_data_json.challenge must equal base64url(signature_payload)
  *
- * The contract only checks the `challenge` field inside the JSON — not
- * `type`/`origin`/`crossOrigin` — so those are set for realism and to keep
- * this a legitimate WebAuthn-shaped assertion, not because verification
- * depends on them. `@noble/curves`'s `p256.sign()` defaults to `prehash:
+ * As of `polaris-contracts`' WebAuthn relying-party fix, the contract also
+ * checks `type` (must be `"webauthn.get"`, set below) and `origin` against
+ * whatever was pinned at the deploying factory's `initialize()` — so
+ * `rpOrigin` here is no longer cosmetic: it must match that factory's
+ * pinned origin exactly (`EMAIL_WALLET_ORIGIN`), or every email-wallet
+ * trade fails with `OriginMismatch`.
+ *
+ * `@noble/curves`'s `p256.sign()` defaults to `prehash:
  * true` — i.e. it SHA-256's its input before signing, which would double-
  * hash a digest that's already hashed. `prehash: false` below is required
  * to sign the digest as-is, matching `secp256r1_verify`'s raw-digest
