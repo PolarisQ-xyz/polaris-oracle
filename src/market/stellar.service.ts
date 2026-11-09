@@ -200,6 +200,7 @@ interface FactoryContractMethods {
   initialize(args: {
     admin: string;
     wasm_hash: Buffer;
+    origin: Buffer;
   }): Promise<StellarContract.AssembledTransaction<StellarContract.Result<void>>>;
   resolve(args: { public_key: Buffer }): Promise<StellarContract.AssembledTransaction<string>>;
 }
@@ -535,15 +536,18 @@ export class StellarService {
 
   /**
    * One-time factory setup pinning which wallet wasm `deploy` will ever
-   * run — must be called once after deploying a fresh
+   * run, and which WebAuthn relying-party `origin` every wallet it deploys
+   * will be bound to — must be called once after deploying a fresh
    * `smart-wallet-factory` instance, before `deployWallet` will do
    * anything. `admin` here is only the authority to set this once; it has
-   * no ongoing role over deployed wallets.
+   * no ongoing role over deployed wallets. See
+   * `polaris-contracts/README.md`'s smart-wallet section for why `origin`
+   * is fixed at factory setup rather than a per-deploy parameter.
    */
-  async initializeFactory(factoryContractId: string, walletWasmHash: Buffer): Promise<string> {
+  async initializeFactory(factoryContractId: string, walletWasmHash: Buffer, origin: Buffer): Promise<string> {
     const client = this.factoryClient(factoryContractId);
     const tx = await this.withRpcRetry(() =>
-      client.initialize({ admin: this.oraclePublicKey, wasm_hash: walletWasmHash }),
+      client.initialize({ admin: this.oraclePublicKey, wasm_hash: walletWasmHash, origin }),
     );
     const sent = await tx.signAndSend();
     sent.result.unwrap();
