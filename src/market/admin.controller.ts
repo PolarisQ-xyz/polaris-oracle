@@ -6,6 +6,7 @@ import { PerpetualRepository } from './perpetual.repository';
 import { EmailAuthRepository } from './email-auth.repository';
 import { AdminActivityRepository } from './admin-activity.repository';
 import { StellarService } from './stellar.service';
+import { OracleService } from './oracle.service';
 
 const DEFAULT_LIST_LIMIT = 50;
 
@@ -29,6 +30,7 @@ export class AdminController {
     private readonly emailWallets: EmailAuthRepository,
     private readonly activity: AdminActivityRepository,
     private readonly stellar: StellarService,
+    private readonly oracle: OracleService,
   ) {}
 
   @Get('overview')
@@ -147,6 +149,7 @@ export class AdminController {
     const health = await this.stellar.getNetworkHealth();
     return {
       ...health,
+      oracleStatus: this.oracle.status,
       oraclePublicKey: this.stellar.oraclePublicKey,
       deployerPublicKey: this.stellar.deployerPublicKey,
       contracts: {

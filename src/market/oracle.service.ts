@@ -40,11 +40,33 @@ export class OracleService implements OnModuleInit, OnModuleDestroy {
   private client: PythLazerClient | undefined;
   private nextSubscriptionId = 1;
   private available = false;
+  private lastStateChangeAt: Date | undefined;
+  private lastUpdateReceivedAt: Date | undefined;
 
   constructor(private readonly config: ConfigService) {}
 
   get isAvailable(): boolean {
     return this.available;
+  }
+
+  /** Returns the observable oracle status for the admin dashboard. */
+  get status(): {
+    configured: boolean;
+    available: boolean;
+    lastStateChangeAt: string | null;
+    lastUpdateReceivedAt: string | null;
+  } {
+    return {
+      configured: this.client !== undefined || !this.isAvailable,
+      available: this.available,
+      lastStateChangeAt: this.lastStateChangeAt?.toISOString() ?? null,
+      lastUpdateReceivedAt: this.lastUpdateReceivedAt?.toISOString() ?? null,
+    };
+  }
+
+  private setAvailable(value: boolean): void {
+    this.available = value;
+    this.lastStateChangeAt = new Date();
   }
 
   async onModuleInit(): Promise<void> {
@@ -63,16 +85,16 @@ export class OracleService implements OnModuleInit, OnModuleDestroy {
       });
       this.client.addAllConnectionsDownListener(() => {
         this.logger.warn('all Pyth Lazer connections down');
-        this.available = false;
+        this.setAvailable(false);
       });
       this.client.addConnectionRestoredListener(() => {
         this.logger.log('Pyth Lazer connection restored');
-        this.available = true;
+        this.setAvailable(true);
       });
-      this.available = true;
+      this.setAvailable(true);
     } catch (err) {
       this.logger.error(`failed to connect to Pyth Lazer: ${(err as Error).message}`);
-      this.available = false;
+      this.setAvailable(false);
     }
   }
 
@@ -106,6 +128,7 @@ export class OracleService implements OnModuleInit, OnModuleDestroy {
         if (event.value.subscriptionId !== subscriptionId) return;
         if (!event.value.leEcdsa) return;
         cleanup();
+        this.lastUpdateReceivedAt = new Date();
         const feed = event.value.parsed?.priceFeeds.find((f) => f.priceFeedId === feedId);
         const priceCents =
           feed?.price !== undefined && feed?.exponent !== undefined
