@@ -278,6 +278,37 @@ still no automated CI test covering the live RPC round-trip itself (see
 [Known gaps](#known-gaps)) — the verification above was a real manual run,
 not a repeatable regression test.
 
+### Market tracking lifecycle
+
+```mermaid
+stateDiagram-v2
+    [*] --> watching : watch() / onModuleInit re-arm
+
+    watching --> watching : expiry timer arms\n(scheduleSettle / scheduleCancel)
+    watching --> pending : trySettle or tryCancel starts
+
+    pending --> settled  : settle() succeeds\n(Lazer or Reflector path)
+    pending --> cancelled : cancel() succeeds\n(grace-period fallback)
+    pending --> settled  : reconcileWithChain detects ResolvedYes/No
+    pending --> cancelled : reconcileWithChain detects Cancelled
+    pending --> pending  : reconcileWithChain read fails (retries)\nor settle/cancel retry (up to 3×)
+
+    settled  --> [*]
+    cancelled --> [*]
+
+    note right of pending
+      Admin can manually trigger
+      triggerSettle or triggerCancel
+      from pending at any time.
+    end note
+```
+
+Automatic transitions fire from timers inside `MarketService`; manual ones
+require an admin API call. `reconcileWithChain` runs after every failed
+settle/cancel and can jump directly to a terminal state if the contract
+already resolved on-chain (e.g. after a crash between the tx confirming and
+this service persisting the result).
+
 ### Market factory automation
 
 `MarketFactoryService` closes the last manual step in market creation:

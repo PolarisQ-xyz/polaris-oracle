@@ -38,6 +38,67 @@ npm test          # 130 unit tests
 npm run lint
 ```
 
+### Running against a local Stellar quickstart (no public testnet needed)
+
+The defaults in `src/config/configuration.ts` point at the public Stellar
+testnet. That means your dev loop depends on external RPC liveness, testnet
+resets, and real funded keys — a Friendbot request every restart. Use the
+`stellar/quickstart` Docker image instead: it spins up a local Horizon +
+RPC node with its own Friendbot, fast ledgers, and no rate limits.
+
+**1. Start the quickstart container**
+
+```sh
+docker run --rm -it \
+  -p 8000:8000 \
+  --name stellar-quickstart \
+  stellar/quickstart:latest \
+  --local \
+  --enable rpc
+```
+
+Wait for `Stellar RPC running` in the logs (usually ~10 s).
+
+**2. Deploy the contracts**
+
+Clone [polaris-contracts](https://github.com/PolarisQ-xyz/polaris-contracts)
+and follow its README to deploy to `--network local`. The deploy script
+prints the contract IDs you need in the next step.
+
+**3. Configure the oracle**
+
+Create `.env.local` (or copy `.env.example` and edit):
+
+```sh
+STELLAR_RPC_URL=http://localhost:8000/soroban/rpc
+STELLAR_NETWORK=local
+STELLAR_NETWORK_PASSPHRASE="Standalone Network ; February 2017"
+HORIZON_URL=http://localhost:8000
+FRIENDBOT_URL=http://localhost:8000/friendbot
+
+# Paste the addresses the deploy script printed:
+VAULT_CONTRACT=CXXX...
+LAZER_CONTRACT=CXXX...
+# ... other contracts
+
+# Optional — omit to test the Reflector-only settle path
+# PYTH_LAZER_TOKEN=...
+```
+
+**4. Run the server**
+
+```sh
+NODE_ENV=development npx dotenv -e .env.local -- npm run start:dev
+```
+
+The server funds its own signer via the local Friendbot on startup, so no
+external key management is needed.
+
+**Tip**: the local ledger closes every ~5 s (configurable with
+`--protocol-version` flags on the container). Expiry timers fire faster
+than on testnet, so you can observe the full `watching → pending →
+settled/cancelled` lifecycle in a couple of minutes without waiting.
+
 ## Communication
 
 Discussion happens in GitHub issues and pull requests. There's no
