@@ -47,7 +47,7 @@ export class EmailAuthService {
   ) {}
 
   async requestCode(email: string): Promise<void> {
-    const normalized = email.trim().toLowerCase();
+    const normalized = canonicalizeEmail(email);
     const existing = this.repo.getCode(normalized);
     const cooldownMs = this.config.get<number>('emailCodeResendCooldownSecs')! * 1000;
     if (existing && Date.now() - existing.created_at < cooldownMs) {
@@ -69,7 +69,7 @@ export class EmailAuthService {
 
   /** Verifies the code, creating (once) and returning the email's custodial wallet, plus a signed session token to hand back as a cookie. */
   async verifyCode(email: string, code: string): Promise<{ address: string; sessionToken: string }> {
-    const normalized = email.trim().toLowerCase();
+    const normalized = canonicalizeEmail(email);
     const row = this.repo.getCode(normalized);
     if (!row) {
       throw new EmailAuthError('No code was requested for this email, or it already expired. Request a new one.');
@@ -113,7 +113,7 @@ export class EmailAuthService {
     args: WireArgs,
     contractKind?: ContractKind,
   ): Promise<{ txHash: string; walletAddress: string }> {
-    const walletRow = this.repo.getWallet(email);
+    const walletRow = this.repo.getWallet(canonicalizeEmail(email));
     if (!walletRow) {
       throw new EmailAuthError('No wallet found for this session — sign in again.');
     }
@@ -179,4 +179,29 @@ export class EmailAuthService {
 
 function hashCode(code: string): string {
   return createHash('sha256').update(code).digest('hex');
+}
+
+/**
+ * Collapses the login-identity variants most inboxes treat as the same
+ * mailbox but a naive `trim().toLowerCase()` does not: plus-addressing
+ * (`user+tag@gmail.com` → `user@gmail.com`) and, for the handful of
+ * providers that ignore dots in the local part (gmail.com,
+ * googlemail.com), dot variants (`u.s.er@gmail.com` → `user@gmail.com`).
+ * Without this, one real inbox can mint an unbounded number of distinct
+ * `normalized` keys — and thus unbounded faucet-funded custodial wallets —
+ * by varying the plus-tag or dot placement while every code email still
+ * lands in the same mailbox.
+ */
+function canonicalizeEmail(email: string): string {
+  const lower = email.trim().toLowerCase();
+  const at = lower.lastIndexOf('@');
+  if (at === -1) return lower;
+  let local = lower.slice(0, at);
+  const domain = lower.slice(at + 1);
+  const plusIdx = local.indexOf('+');
+  if (plusIdx !== -1) local = local.slice(0, plusIdx);
+  if (domain === 'gmail.com' || domain === 'googlemail.com') {
+    local = local.replace(/\./g, '');
+  }
+  return `${local}@${domain}`;
 }
