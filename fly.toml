@@ -15,6 +15,10 @@ app = 'polaris-oracle-api'
 primary_region = 'iad'
 
 [build]
+
+[env]
+  NODE_ENV = 'production'
+
 [[mounts]]
   source = 'polaris_oracle_data'
   destination = '/app/data'
