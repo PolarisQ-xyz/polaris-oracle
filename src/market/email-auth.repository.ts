@@ -56,6 +56,7 @@ export class EmailAuthRepository {
     `);
   }
 
+  /** Note: `attempts` is deliberately left out of the ON CONFLICT update — a resend must not reset the guess counter, or an attacker could refresh their attempt budget just by requesting a new code. */
   saveCode(email: string, codeHash: string, expiresAt: number): void {
     this.db
       .prepare(
@@ -64,7 +65,6 @@ export class EmailAuthRepository {
          ON CONFLICT(email) DO UPDATE SET
            code_hash = excluded.code_hash,
            expires_at = excluded.expires_at,
-           attempts = 0,
            created_at = excluded.created_at`,
       )
       .run({ email, codeHash, expiresAt, createdAt: Date.now() });

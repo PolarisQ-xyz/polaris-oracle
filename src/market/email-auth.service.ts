@@ -54,6 +54,15 @@ export class EmailAuthService {
       const waitSecs = Math.ceil((cooldownMs - (Date.now() - existing.created_at)) / 1000);
       throw new EmailAuthError(`Please wait ${waitSecs}s before requesting another code.`);
     }
+    // Resending must not reset the guess counter: attempts persist across
+    // resends (see EmailAuthRepository#saveCode), so a locked-out code stays
+    // locked until it naturally expires instead of an attacker refreshing
+    // the attempt budget by just asking for a new code.
+    const maxAttempts = this.config.get<number>('emailCodeMaxAttempts')!;
+    if (existing && existing.attempts >= maxAttempts && Date.now() <= existing.expires_at) {
+      const waitSecs = Math.ceil((existing.expires_at - Date.now()) / 1000);
+      throw new EmailAuthError(`Too many incorrect attempts. Try again in ${waitSecs}s.`);
+    }
 
     const code = randomInt(100_000, 1_000_000).toString();
     const codeHash = hashCode(code);
@@ -76,8 +85,11 @@ export class EmailAuthService {
     }
     const maxAttempts = this.config.get<number>('emailCodeMaxAttempts')!;
     if (row.attempts >= maxAttempts) {
-      this.repo.deleteCode(normalized);
-      throw new EmailAuthError('Too many incorrect attempts. Request a new code.');
+      // Do NOT delete the row here: deleting it would let a caller simply
+      // call requestCode again to get a fresh attempts=0 row immediately,
+      // defeating the lockout. The row (and its attempts count) is left in
+      // place until it naturally expires.
+      throw new EmailAuthError('Too many incorrect attempts. Request a new code once this one expires.');
     }
     if (Date.now() > row.expires_at) {
       this.repo.deleteCode(normalized);
