@@ -13,6 +13,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { Request } from 'express';
 import { StellarService } from './stellar.service';
+import { isValidStellarAddress } from './stellar-address';
 import { AuthRelayService } from './auth-relay.service';
 import { WalletDeployRateLimiter } from './wallet-deploy-rate-limiter.service';
 import { AdminActivityRepository, type WalletActionFunction } from './admin-activity.repository';
@@ -68,6 +69,9 @@ export class WalletController {
   async balance(@Query('address') address: string) {
     if (!address) {
       throw new BadRequestException('address query param is required');
+    }
+    if (!isValidStellarAddress(address)) {
+      throw new BadRequestException('address query param is not a valid Stellar address');
     }
     const nativeXlmSac = this.config.get<string>('nativeXlmSac');
     if (!nativeXlmSac) {

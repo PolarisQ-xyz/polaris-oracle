@@ -2,6 +2,7 @@ import { BadRequestException, Body, Controller, Get, HttpCode, Logger, NotFoundE
 import { ConfigService } from '@nestjs/config';
 import { PerpetualService } from './perpetual.service';
 import { StellarService } from './stellar.service';
+import { isValidStellarAddress } from './stellar-address';
 import { OracleService } from './oracle.service';
 import { AdminGuard } from './admin.guard';
 import { AdminActivityRepository } from './admin-activity.repository';
@@ -59,6 +60,7 @@ export class PerpetualController {
   @Get(':id/position')
   async position(@Param('id') id: string, @Query('address') address: string) {
     if (!address) throw new BadRequestException('address query param is required');
+    if (!isValidStellarAddress(address)) throw new BadRequestException('address query param is not a valid Stellar address');
     const [yes, no] = await this.stellar.getPerpetualPosition(id, address);
     return { yes: yes.toString(), no: no.toString() };
   }
