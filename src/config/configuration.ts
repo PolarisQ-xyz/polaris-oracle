@@ -137,6 +137,37 @@ function devFallbackSecret(envVar: string, byteLength: number): string {
   return randomBytes(byteLength).toString('hex');
 }
 
+/**
+ * Every numeric setting used to be `Number(process.env.X ?? default)`,
+ * which silently turns a typo'd value (`"five"`, `"300s"`) into `NaN`.
+ * `NaN` then flows into safety checks with surprising results —
+ * `recent.length >= NaN` is always false (rate limiters stop limiting),
+ * `setInterval(fn, NaN)` fires roughly every 1ms — with no boot-time
+ * signal. This throws instead, naming the bad variable, and optionally
+ * enforces a range/integer constraint.
+ */
+function requireNumber(
+  name: string,
+  defaultValue: number,
+  opts: { min?: number; max?: number; integer?: boolean } = {},
+): number {
+  const raw = process.env[name];
+  const value = raw === undefined || raw === '' ? defaultValue : Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new Error(`[config] ${name} must be a valid number, got ${JSON.stringify(raw)}`);
+  }
+  if (opts.integer && !Number.isInteger(value)) {
+    throw new Error(`[config] ${name} must be an integer, got ${raw}`);
+  }
+  if (opts.min !== undefined && value < opts.min) {
+    throw new Error(`[config] ${name} must be >= ${opts.min}, got ${value}`);
+  }
+  if (opts.max !== undefined && value > opts.max) {
+    throw new Error(`[config] ${name} must be <= ${opts.max}, got ${value}`);
+  }
+  return value;
+}
+
 // XLM/USD's real Hermes registry id — confirmed live against
 // `hermes.pyth.network`'s own `/v2/price_feeds?query=XLM` lookup and a real
 // `/v2/updates/price/latest` read (not copied from memory/docs and hoped
@@ -174,7 +205,7 @@ function parseFeedCatalog(raw: string | undefined): { feedId: number; hermesFeed
 }
 
 export default (): AppConfig => ({
-  port: Number(process.env.PORT ?? 3000),
+  port: requireNumber('PORT', 3000, { min: 1, max: 65535, integer: true }),
   oracleSecretKey: process.env.ORACLE_SECRET_KEY ?? '',
   deployerSecretKey: process.env.DEPLOYER_SECRET_KEY,
   adminApiKey: process.env.ADMIN_API_KEY ?? '',
@@ -198,50 +229,50 @@ export default (): AppConfig => ({
   treasuryAddress: process.env.TREASURY_ADDRESS,
   // Placeholder testnet feed id — production must use Pyth's real
   // registered Lazer feed id for XLM/USD (see contracts README).
-  xlmUsdFeedId: Number(process.env.XLM_USD_FEED_ID ?? 100),
+  xlmUsdFeedId: requireNumber('XLM_USD_FEED_ID', 100, { integer: true, min: 0 }),
   marketsDbFile: process.env.MARKETS_DB_FILE ?? './data/markets.db',
   friendbotUrl: process.env.FRIENDBOT_URL ?? 'https://friendbot.stellar.org',
   faucetAmountStroops: process.env.FAUCET_AMOUNT_STROOPS ?? '5000000000', // 500 XLM
-  faucetMaxPerHour: Number(process.env.FAUCET_MAX_PER_HOUR ?? 3),
-  walletDeployMaxPerHour: Number(process.env.WALLET_DEPLOY_MAX_PER_HOUR ?? 5),
-  settleFreshnessWindowSecs: Number(process.env.SETTLE_FRESHNESS_WINDOW_SECS ?? 300),
+  faucetMaxPerHour: requireNumber('FAUCET_MAX_PER_HOUR', 3, { min: 0 }),
+  walletDeployMaxPerHour: requireNumber('WALLET_DEPLOY_MAX_PER_HOUR', 5, { min: 0 }),
+  settleFreshnessWindowSecs: requireNumber('SETTLE_FRESHNESS_WINDOW_SECS', 300, { min: 0 }),
   // 32 bytes hex = AES-256-GCM key, encrypting custodial private keys at rest.
   emailWalletEncKeyHex: devFallbackSecret('EMAIL_WALLET_ENC_KEY', 32),
   sessionJwtSecret: devFallbackSecret('SESSION_JWT_SECRET', 32),
-  sessionTtlSecs: Number(process.env.SESSION_TTL_SECS ?? 60 * 60 * 24 * 30), // 30 days
+  sessionTtlSecs: requireNumber('SESSION_TTL_SECS', 60 * 60 * 24 * 30, { min: 1 }), // 30 days
   // 'console' (default, logs the code — no real delivery) or 'resend'.
   emailProvider: process.env.EMAIL_PROVIDER ?? 'console',
   resendApiKey: process.env.RESEND_API_KEY,
   emailFrom: process.env.EMAIL_FROM ?? 'Polaris <login@polaris.app>',
-  emailCodeTtlSecs: Number(process.env.EMAIL_CODE_TTL_SECS ?? 600), // 10 minutes
-  emailCodeMaxAttempts: Number(process.env.EMAIL_CODE_MAX_ATTEMPTS ?? 5),
-  emailCodeResendCooldownSecs: Number(process.env.EMAIL_CODE_RESEND_COOLDOWN_SECS ?? 60),
+  emailCodeTtlSecs: requireNumber('EMAIL_CODE_TTL_SECS', 600, { min: 1 }), // 10 minutes
+  emailCodeMaxAttempts: requireNumber('EMAIL_CODE_MAX_ATTEMPTS', 5, { min: 1, integer: true }),
+  emailCodeResendCooldownSecs: requireNumber('EMAIL_CODE_RESEND_COOLDOWN_SECS', 60, { min: 0 }),
   emailWalletRpId: process.env.EMAIL_WALLET_RP_ID ?? 'localhost',
   emailWalletOrigin: process.env.EMAIL_WALLET_ORIGIN ?? 'http://localhost:3000',
   vaultContract: process.env.VAULT_CONTRACT,
   feedCatalog: parseFeedCatalog(process.env.FEED_CATALOG),
-  settleOracleToleranceBps: Number(process.env.SETTLE_ORACLE_TOLERANCE_BPS ?? 150),
+  settleOracleToleranceBps: requireNumber('SETTLE_ORACLE_TOLERANCE_BPS', 150, { min: 0 }),
   reflectorContract: process.env.REFLECTOR_CONTRACT,
   reflectorAsset: process.env.REFLECTOR_ASSET ?? 'XLM',
   // Comfortably above the real Reflector testnet oracle's own resolution()
   // (300s, confirmed live) — initialize() itself also validates this
   // on-chain against whatever the configured instance actually reports.
   reflectorMaxStalenessSecs: process.env.REFLECTOR_MAX_STALENESS_SECS ?? '600',
-  reflectorToleranceBps: Number(process.env.REFLECTOR_TOLERANCE_BPS ?? 150),
+  reflectorToleranceBps: requireNumber('REFLECTOR_TOLERANCE_BPS', 150, { min: 0 }),
   // 5 min: this is now a safety net for a missed 'finalized' event (see
   // MarketFactoryService), not the primary creation trigger — the common
   // case is a cheap hasOpenMarket check with no network calls, and staying
   // well under marketFactoryGracePeriodSecs (1h default) bounds how long a
   // crash right after expiry could leave a feed dark.
-  marketFactoryIntervalSecs: Number(process.env.MARKET_FACTORY_INTERVAL_SECS ?? 5 * 60),
-  oddsSnapshotIntervalSecs: Number(process.env.ODDS_SNAPSHOT_INTERVAL_SECS ?? 5 * 60),
-  oddsChangeWindowSecs: Number(process.env.ODDS_CHANGE_WINDOW_SECS ?? 60 * 60),
-  marketFactoryExpirySecs: Number(process.env.MARKET_FACTORY_EXPIRY_SECS ?? 24 * 60 * 60), // 24 hours
-  marketFactoryGracePeriodSecs: Number(process.env.MARKET_FACTORY_GRACE_PERIOD_SECS ?? 3600),
-  marketFactoryBaseFeeBps: Number(process.env.MARKET_FACTORY_BASE_FEE_BPS ?? 100),
-  marketFactoryMinFeeBps: Number(process.env.MARKET_FACTORY_MIN_FEE_BPS ?? 20),
+  marketFactoryIntervalSecs: requireNumber('MARKET_FACTORY_INTERVAL_SECS', 5 * 60, { min: 1 }),
+  oddsSnapshotIntervalSecs: requireNumber('ODDS_SNAPSHOT_INTERVAL_SECS', 5 * 60, { min: 1 }),
+  oddsChangeWindowSecs: requireNumber('ODDS_CHANGE_WINDOW_SECS', 60 * 60, { min: 1 }),
+  marketFactoryExpirySecs: requireNumber('MARKET_FACTORY_EXPIRY_SECS', 24 * 60 * 60, { min: 1 }), // 24 hours
+  marketFactoryGracePeriodSecs: requireNumber('MARKET_FACTORY_GRACE_PERIOD_SECS', 3600, { min: 0 }),
+  marketFactoryBaseFeeBps: requireNumber('MARKET_FACTORY_BASE_FEE_BPS', 100, { min: 0 }),
+  marketFactoryMinFeeBps: requireNumber('MARKET_FACTORY_MIN_FEE_BPS', 20, { min: 0 }),
   marketFactoryInitialLiquidityStroops: process.env.MARKET_FACTORY_INITIAL_LIQUIDITY_STROOPS ?? '1000000000', // 100 XLM
   mockRedstoneContract: process.env.MOCK_REDSTONE_CONTRACT,
   redstoneMaxStalenessSecs: process.env.REDSTONE_MAX_STALENESS_SECS ?? '600',
-  redstoneToleranceBps: Number(process.env.REDSTONE_TOLERANCE_BPS ?? 150),
+  redstoneToleranceBps: requireNumber('REDSTONE_TOLERANCE_BPS', 150, { min: 0 }),
 });
