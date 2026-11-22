@@ -221,7 +221,58 @@ function parseFeedCatalog(raw: string | undefined): { feedId: number; hermesFeed
   return DEFAULT_FEED_CATALOG;
 }
 
-export default (): AppConfig => ({
+const isProduction = process.env.NODE_ENV === 'production';
+
+/**
+ * Catches the "deploys fine, funds wallets fine, then every email trade
+ * fails with OriginMismatch" footgun: `emailWalletOrigin` must exactly
+ * match the smart-wallet factory's pinned origin on-chain, and
+ * `emailWalletEncKeyHex`/`sessionJwtSecret` must not be left on their
+ * dev-only random fallback. Dev/test behavior (warnings only) is
+ * unchanged — this only throws when NODE_ENV=production.
+ */
+function assertProductionReady(cfg: {
+  emailWalletOrigin: string;
+  corsOrigins: string[];
+  emailWalletEncKeyWasFallback: boolean;
+  sessionJwtSecretWasFallback: boolean;
+}): void {
+  if (!isProduction) return;
+  const problems: string[] = [];
+  if (cfg.emailWalletOrigin.startsWith('http://localhost')) {
+    problems.push('EMAIL_WALLET_ORIGIN is still set to a localhost default');
+  }
+  if (cfg.emailWalletEncKeyWasFallback) {
+    problems.push('EMAIL_WALLET_ENC_KEY is unset — production must not run on a random per-boot key');
+  }
+  if (cfg.sessionJwtSecretWasFallback) {
+    problems.push('SESSION_JWT_SECRET is unset — production must not run on a random per-boot secret');
+  }
+  if (cfg.corsOrigins.length === 0) {
+    problems.push('CORS_ORIGINS is empty');
+  }
+  if (problems.length > 0) {
+    throw new Error(`[config] refusing to boot in production:\n${problems.map((p) => ` - ${p}`).join('\n')}`);
+  }
+}
+
+export default (): AppConfig => {
+  const emailWalletEncKeyWasFallback = !process.env.EMAIL_WALLET_ENC_KEY;
+  const sessionJwtSecretWasFallback = !process.env.SESSION_JWT_SECRET;
+  const corsOrigins = (process.env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+  const emailWalletOrigin = process.env.EMAIL_WALLET_ORIGIN ?? 'http://localhost:3000';
+
+  assertProductionReady({
+    emailWalletOrigin,
+    corsOrigins,
+    emailWalletEncKeyWasFallback,
+    sessionJwtSecretWasFallback,
+  });
+
+  return {
   port: requireNumber('PORT', 3000, { min: 1, max: 65535, integer: true }),
   oracleSecretKey: process.env.ORACLE_SECRET_KEY ?? '',
   deployerSecretKey: process.env.DEPLOYER_SECRET_KEY,
@@ -229,10 +280,7 @@ export default (): AppConfig => ({
   pythLazerToken: process.env.PYTH_LAZER_TOKEN,
   pythLazerWsUrl: process.env.PYTH_LAZER_WS_URL ?? 'wss://pyth-lazer.dourolabs.app/v1/stream',
   pythHermesUrl: process.env.PYTH_HERMES_URL ?? 'https://hermes.pyth.network',
-  corsOrigins: (process.env.CORS_ORIGINS ?? '')
-    .split(',')
-    .map((o) => o.trim())
-    .filter(Boolean),
+  corsOrigins,
   stellarRpcUrl: process.env.STELLAR_RPC_URL ?? 'https://soroban-testnet.stellar.org',
   stellarNetworkPassphrase:
     process.env.STELLAR_NETWORK_PASSPHRASE ?? 'Test SDF Network ; September 2015',
@@ -267,7 +315,7 @@ export default (): AppConfig => ({
   emailCodeMaxAttempts: requireNumber('EMAIL_CODE_MAX_ATTEMPTS', 5, { min: 1, integer: true }),
   emailCodeResendCooldownSecs: requireNumber('EMAIL_CODE_RESEND_COOLDOWN_SECS', 60, { min: 0 }),
   emailWalletRpId: process.env.EMAIL_WALLET_RP_ID ?? 'localhost',
-  emailWalletOrigin: process.env.EMAIL_WALLET_ORIGIN ?? 'http://localhost:3000',
+  emailWalletOrigin,
   vaultContract: process.env.VAULT_CONTRACT,
   feedCatalog: parseFeedCatalog(process.env.FEED_CATALOG),
   settleOracleToleranceBps: requireNumber('SETTLE_ORACLE_TOLERANCE_BPS', 150, { min: 0 }),
@@ -294,4 +342,5 @@ export default (): AppConfig => ({
   mockRedstoneContract: process.env.MOCK_REDSTONE_CONTRACT,
   redstoneMaxStalenessSecs: process.env.REDSTONE_MAX_STALENESS_SECS ?? '600',
   redstoneToleranceBps: requireNumber('REDSTONE_TOLERANCE_BPS', 150, { min: 0 }),
-});
+  };
+};
