@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Keypair, rpc } from '@stellar/stellar-sdk';
 import { contract as StellarContract } from '@stellar/stellar-sdk';
@@ -231,7 +231,7 @@ interface VaultContractMethods {
  * requirement.
  */
 @Injectable()
-export class StellarService {
+export class StellarService implements OnModuleInit {
   private readonly logger = new Logger(StellarService.name);
   readonly server: rpc.Server;
   private readonly keypair: Keypair;
@@ -269,6 +269,25 @@ export class StellarService {
     this.networkPassphrase = this.config.get<string>('stellarNetworkPassphrase')!;
     this.rpcUrl = this.config.get<string>('stellarRpcUrl')!;
     this.server = new rpc.Server(this.rpcUrl, { allowHttp: this.rpcUrl.startsWith('http://') });
+  }
+
+  /**
+   * `stellarRpcUrl`, `stellarNetworkPassphrase` and `stellarNetwork` are
+   * three independent env vars with testnet defaults — nothing previously
+   * checked that the configured passphrase actually matches the RPC it
+   * points at. Pointing at mainnet RPC with the default testnet passphrase
+   * (or vice versa) only used to surface as signature/txBadAuth failures
+   * on the first write, well after boot succeeded. Fail fast instead.
+   */
+  async onModuleInit(): Promise<void> {
+    const { passphrase } = await this.server.getNetwork();
+    if (passphrase !== this.networkPassphrase) {
+      throw new Error(
+        `[StellarService] configured STELLAR_NETWORK_PASSPHRASE ("${this.networkPassphrase}") does not match ` +
+          `the network passphrase reported by ${this.rpcUrl} ("${passphrase}")`,
+      );
+    }
+    this.logger.log(`Connected to Stellar network "${this.networkPassphrase}" via ${this.rpcUrl}`);
   }
 
   get oraclePublicKey(): string {
