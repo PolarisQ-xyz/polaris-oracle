@@ -168,6 +168,23 @@ function requireNumber(
   return value;
 }
 
+const HEX_32_BYTES = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * `emailWalletEncKeyHex` is passed straight into
+ * `Buffer.from(keyHex, 'hex')` in `email-crypto.ts`, which silently
+ * truncates at the first non-hex character rather than throwing — a
+ * mis-pasted key would otherwise only surface as an opaque
+ * `Invalid key length` error on the first email login, long after
+ * deploy succeeded. Require exactly 64 hex chars (32 bytes) up front.
+ */
+function requireHex32Bytes(name: string, value: string): string {
+  if (!HEX_32_BYTES.test(value)) {
+    throw new Error(`[config] ${name} must be 64 hex characters (32 bytes), got length ${value.length}`);
+  }
+  return value;
+}
+
 // XLM/USD's real Hermes registry id — confirmed live against
 // `hermes.pyth.network`'s own `/v2/price_feeds?query=XLM` lookup and a real
 // `/v2/updates/price/latest` read (not copied from memory/docs and hoped
@@ -237,7 +254,9 @@ export default (): AppConfig => ({
   walletDeployMaxPerHour: requireNumber('WALLET_DEPLOY_MAX_PER_HOUR', 5, { min: 0 }),
   settleFreshnessWindowSecs: requireNumber('SETTLE_FRESHNESS_WINDOW_SECS', 300, { min: 0 }),
   // 32 bytes hex = AES-256-GCM key, encrypting custodial private keys at rest.
-  emailWalletEncKeyHex: devFallbackSecret('EMAIL_WALLET_ENC_KEY', 32),
+  emailWalletEncKeyHex: process.env.EMAIL_WALLET_ENC_KEY
+    ? requireHex32Bytes('EMAIL_WALLET_ENC_KEY', process.env.EMAIL_WALLET_ENC_KEY)
+    : devFallbackSecret('EMAIL_WALLET_ENC_KEY', 32),
   sessionJwtSecret: devFallbackSecret('SESSION_JWT_SECRET', 32),
   sessionTtlSecs: requireNumber('SESSION_TTL_SECS', 60 * 60 * 24 * 30, { min: 1 }), // 30 days
   // 'console' (default, logs the code — no real delivery) or 'resend'.
