@@ -34,6 +34,12 @@ RUN npm run build
 # directly as --source (see stellar.service.ts) — no separate CLI identity
 # to provision at container start, unlike an earlier design.
 
+# Without this, cookieOptions() (email-auth.controller.ts, via
+# configuration.ts's cookieSecure/cookieSameSite) takes the dev branch:
+# no Secure flag, and SameSite=Lax silently drops the session cookie on
+# cross-site fetches from the frontend.
+ENV NODE_ENV=production
+
 EXPOSE 3000
 VOLUME ["/app/data"]
 

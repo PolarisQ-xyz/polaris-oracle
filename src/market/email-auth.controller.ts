@@ -120,14 +120,10 @@ export class EmailAuthController {
   }
 
   private cookieOptions() {
-    const isProd = process.env.NODE_ENV === 'production';
     return {
       httpOnly: true,
-      secure: isProd,
-      // Cross-site (different domain in a real deployment) cookies need
-      // SameSite=None+Secure; same-site dev (localhost:3000 -> :3001) works
-      // fine with Lax and doesn't need `Secure` over plain http.
-      sameSite: (isProd ? 'none' : 'lax') as 'none' | 'lax',
+      secure: this.config.get<boolean>('cookieSecure')!,
+      sameSite: this.config.get<'none' | 'lax'>('cookieSameSite')!,
       maxAge: this.config.get<number>('sessionTtlSecs')! * 1000,
       path: '/',
     };
