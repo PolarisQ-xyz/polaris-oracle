@@ -141,7 +141,14 @@ function readCookie(req: Request, name: string): string | undefined {
     const eq = part.indexOf('=');
     if (eq === -1) continue;
     if (part.slice(0, eq).trim() === name) {
-      return decodeURIComponent(part.slice(eq + 1).trim());
+      const raw = part.slice(eq + 1).trim();
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        // A malformed percent-encoding (e.g. a stray/tampered cookie) must
+        // not 500 the request — treat it as "no session cookie" instead.
+        return undefined;
+      }
     }
   }
   return undefined;
