@@ -18,6 +18,25 @@ import { CreatePerpetualDto } from './dto/create-perpetual.dto';
  * here is a one-shot admin action.
  */
 @Controller('perpetuals')
+/**
+ * Admin action handlers for Perpetual lifecycle management.
+ *
+ * - `create`   : Deploys a new perpetual contract and registers it.
+ *                Preconditions: valid DTO, vault funding available.
+ *                Side effects: on-chain deployment, repository insertion.
+ *
+ * - `doCheckpoint` : Records an informational price checkpoint on-chain.
+ *                     Preconditions: perpetual must be active. Side effects:
+ *                     on-chain `checkpoint` call, audit log entry.
+ *
+ * - `terminate` : Winds down a perpetual, distributing remaining assets.
+ *                Preconditions: perpetual in active state. Side effects:
+ *                on-chain termination, status update, possible fund
+ *                redistribution.
+ *
+ * These admin routes are protected by `AdminGuard` because they modify
+ * on‑chain state or internal tracking.
+ */
 export class PerpetualController {
   private readonly logger = new Logger(PerpetualController.name);
 
