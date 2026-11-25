@@ -146,6 +146,52 @@ export class MarketController {
     return this.factory.run();
   }
 
+  @Post('factory/pause')
+  @UseGuards(AdminGuard)
+  @HttpCode(200)
+  pauseFactory() {
+    return this.factory.pause();
+  }
+
+  @Post('factory/resume')
+  @UseGuards(AdminGuard)
+  @HttpCode(200)
+  resumeFactory() {
+    return this.factory.resume();
+  }
+
+  /**
+   * Retry settle/cancel for every pending market in one admin call (#180).
+   * Markets past grace are tried for cancel; others are tried for settle.
+   * Processed sequentially so sequence-number collisions on the shared
+   * source account are avoided.
+   */
+  @Post('pending/retry')
+  @UseGuards(AdminGuard)
+  @HttpCode(200)
+  async retryPending() {
+    const pending = this.markets.list().filter((m) => m.status === 'pending');
+    const results: { contractId: string; action: 'settle' | 'cancel'; outcome: 'ok' | 'error'; error?: string }[] = [];
+    const now = Date.now();
+
+    for (const m of pending) {
+      const graceEndMs = m.expiry * 1000 + m.gracePeriodSecs * 1000;
+      const action: 'settle' | 'cancel' = now > graceEndMs ? 'cancel' : 'settle';
+      try {
+        if (action === 'cancel') {
+          await this.markets.triggerCancel(m.contractId);
+        } else {
+          await this.markets.triggerSettle(m.contractId);
+        }
+        results.push({ contractId: m.contractId, action, outcome: 'ok' });
+      } catch (err) {
+        results.push({ contractId: m.contractId, action, outcome: 'error', error: (err as Error).message });
+      }
+    }
+
+    return { processed: results.length, results };
+  }
+
   @Post('watch')
   @UseGuards(AdminGuard)
   async watch(@Body() dto: WatchMarketDto) {

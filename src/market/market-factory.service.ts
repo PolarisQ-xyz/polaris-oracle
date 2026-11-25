@@ -52,7 +52,39 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     private readonly activity: AdminActivityRepository,
   ) {}
 
+  // ---- factory pause/resume (issue #179) -----------------------------------
+  // In-memory flag backed by SQLite so the paused state survives restarts.
+  // The flag is loaded eagerly in onModuleInit before the timer starts, so
+  // a restart after a pause keeps the factory stopped without operator
+  // intervention.
+  private paused = false;
+
+  /** Pause the factory; persists across restarts. Returns the new state. */
+  pause(): { paused: true } {
+    this.paused = true;
+    this.activity.setFlag('factory_paused', '1');
+    this.logger.warn('Market factory PAUSED by admin');
+    return { paused: true };
+  }
+
+  /** Resume the factory. Returns the new state. */
+  resume(): { paused: false } {
+    this.paused = false;
+    this.activity.setFlag('factory_paused', '0');
+    this.logger.log('Market factory RESUMED by admin');
+    return { paused: false };
+  }
+
+  /** Current pause state (for the admin overview). */
+  isPaused(): boolean {
+    return this.paused;
+  }
+
   onModuleInit(): void {
+    // Restore persisted pause state before arming the timer (issue #179).
+    this.paused = this.activity.getFlag('factory_paused') === '1';
+    if (this.paused) this.logger.warn('Market factory starting in PAUSED state (persisted from prior run)');
+
     // Relies on MarketService.onModuleInit() never emitting 'finalized'
     // *synchronously* during Nest's provider-init tick — true today, since
     // its fire-and-forget trySettle/tryCancel calls are gated on real I/O
@@ -122,7 +154,9 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     | { status: 'failed'; error: string }
     | { status: 'created'; contractId: string; strikePriceCents: string }
   > {
-    if (this.hasOpenMarket(entry.feedId) || this.rolling.has(entry.feedId)) {
+    // Return 'skipped' while paused so the caller's result list reflects the
+    // factory is intentionally not creating markets (issue #179).
+    if (this.paused || this.hasOpenMarket(entry.feedId) || this.rolling.has(entry.feedId)) {
       return { status: 'skipped' };
     }
     this.rolling.add(entry.feedId);

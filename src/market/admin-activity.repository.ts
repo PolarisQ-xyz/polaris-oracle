@@ -102,6 +102,10 @@ export class AdminActivityRepository implements OnModuleDestroy {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_settlement_checks_created_at ON settlement_checks(created_at);
+      CREATE TABLE IF NOT EXISTS kv_flags (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
   }
 
@@ -204,6 +208,17 @@ export class AdminActivityRepository implements OnModuleDestroy {
     const counts: Record<SettlementCheckOutcome, number> = { ok: 0, skipped: 0, failed: 0 };
     for (const row of rows) counts[row.outcome] = row.n;
     return counts;
+  }
+
+  /** Persist a named flag (issue #179 — factory pause state). */
+  setFlag(key: string, value: string): void {
+    this.db.prepare(`INSERT INTO kv_flags (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, value);
+  }
+
+  /** Read a named flag; returns null when unset. */
+  getFlag(key: string): string | null {
+    const row = this.db.prepare(`SELECT value FROM kv_flags WHERE key = ?`).get(key) as { value: string } | undefined;
+    return row?.value ?? null;
   }
 
   onModuleDestroy(): void {

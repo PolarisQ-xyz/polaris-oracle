@@ -2,6 +2,7 @@ import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AdminGuard } from './admin.guard';
 import { MarketRepository } from './market.repository';
+import { MarketFactoryService } from './market-factory.service';
 import { PerpetualRepository } from './perpetual.repository';
 import { EmailAuthRepository } from './email-auth.repository';
 import { AdminActivityRepository } from './admin-activity.repository';
@@ -25,6 +26,7 @@ export class AdminController {
   constructor(
     private readonly config: ConfigService,
     private readonly markets: MarketRepository,
+    private readonly factory: MarketFactoryService,
     private readonly perpetuals: PerpetualRepository,
     private readonly emailWallets: EmailAuthRepository,
     private readonly activity: AdminActivityRepository,
@@ -65,6 +67,7 @@ export class AdminController {
       vaultBalanceStroops,
       totalWalletActions: this.activity.countWalletActions(),
       settlementChecksByOutcome: this.activity.countSettlementChecksByOutcome(),
+      factoryPaused: this.factory.isPaused(),
     };
   }
 
