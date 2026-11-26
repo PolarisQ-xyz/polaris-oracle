@@ -93,6 +93,7 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     // registered a few lines below in the same synchronous tick.
     this.events.on('finalized', (m: WatchedMarket) => {
       try {
+        void this.redeemFromMarket(m);
         const entry = this.catalogEntry(m.feedId);
         if (entry) void this.rollFeed(entry);
       } catch (err) {
@@ -197,7 +198,51 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /** Looks up the catalog entry for a feed by its numeric ID; returns undefined if the feed is not in the configured catalog. */
+  /**
+   * The counterpart to `createMarketFor`'s `vaultWithdraw`: a finalized
+   * market's remaining payout has to be explicitly redeemed back into the
+   * vault's shared custody, or the capital never returns and the vault
+   * drains on a fixed schedule (one `MARKET_FACTORY_INITIAL_LIQUIDITY_STROOPS`
+   * per rolled market). Only runs for factory-created markets — one whose
+   * on-chain `treasury` is this vault; a manually created market
+   * (`treasury` != vault) is skipped, matching `POST /markets/create`'s own
+   * "manual ops are manual" scope.
+   */
+  private async redeemFromMarket(m: WatchedMarket): Promise<void> {
+    const vaultContract = this.config.get<string>('vaultContract');
+    if (!vaultContract) return;
+    try {
+      const state = await this.stellar.getMarketState(m.contractId);
+      if (state.treasury !== vaultContract) return;
+      const txHash = await this.stellar.vaultRedeemFromMarket(vaultContract, m.contractId);
+      this.activity.recordVaultFlow({
+        vaultContractId: vaultContract,
+        amountStroops: '0',
+        marketContractId: m.contractId,
+        txHash,
+        direction: 'in',
+        status: 'ok',
+      });
+      this.logger.log(`redeemed finalized market ${m.contractId} back into vault ${vaultContract} (tx ${txHash})`);
+    } catch (err) {
+      const message = (err as Error).message;
+      this.logger.error(`vault redeem_from_market failed for ${m.contractId}: ${message}`);
+      try {
+        this.activity.recordVaultFlow({
+          vaultContractId: vaultContract,
+          amountStroops: '0',
+          marketContractId: m.contractId,
+          txHash: undefined,
+          direction: 'in',
+          status: 'failed',
+          error: message,
+        });
+      } catch {
+        // best-effort logging only, never let this mask the original failure
+      }
+    }
+  }
+
   private catalogEntry(feedId: number): FeedCatalogEntry | undefined {
     const catalog = this.config.get<FeedCatalogEntry[]>('feedCatalog') ?? [];
     return catalog.find((e) => e.feedId === feedId);

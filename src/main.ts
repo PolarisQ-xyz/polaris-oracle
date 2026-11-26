@@ -15,6 +15,16 @@ async function bootstrap() {
   );
   app.useGlobalInterceptors(new RequestLoggerInterceptor());
 
+  // Behind Fly.io's edge proxy, Express reports the proxy's own address as
+  // req.ip unless told how many trusted hops sit in front of the app. That
+  // breaks WalletDeployRateLimiter (keyed on req.ip): every request looks
+  // like it comes from the same IP, so the limiter bucket is effectively
+  // global instead of per-client. Trust exactly one hop by default (Fly's
+  // proxy) — never `true`, which would trust an arbitrary client-supplied
+  // X-Forwarded-For and let a request pick its own rate-limit bucket.
+  const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS ?? 1);
+  app.getHttpAdapter().getInstance().set('trust proxy', trustProxyHops);
+
   const origins = resolveCorsOrigins(process.env.CORS_ORIGINS);
   if (origins.length === 0) {
     // eslint-disable-next-line no-console

@@ -26,6 +26,34 @@ import { OddsSnapshotRepository } from './odds-snapshot.repository';
 import { AdminActivityRepository } from './admin-activity.repository';
 
 @Controller('markets')
+/**
+ * Admin action handlers for Market lifecycle management.
+ *
+ * - `create`  : Deploys a new market contract and initializes it.
+ *               Preconditions: valid market DTO, sufficient vault funds.
+ *               Side effects: on-chain contract deployment, vault fund transfer,
+ *               and persistent repository entry creation.
+ *
+ * - `runFactory` : Triggers the MarketFactoryService to sweep the feed catalog
+ *                  and optionally create markets immediately. No on-chain
+ *                  effect beyond whatever markets the factory decides to deploy.
+ *
+ * - `settle` : Settles a resolved market against the latest Lazer price.
+ *              Preconditions: market must be in `settling` state, Lazer price
+ *              available. Side effects: on-chain `settle` call, updates market
+ *              status, records settlement check activity.
+ *
+ * - `cancel` : Force‑cancels a market as a liveness backstop. Preconditions:
+ *              market not already settled or cancelled. Side effects: on-chain
+ *              `cancel` call, status transition, possible vault fund refunds.
+ *
+ * - `watch`  : Starts tracking an already‑deployed market contract. Preconditions:
+ *              contract address valid and reachable. Side effects: adds market
+ *              to the repository, begins state polling.
+ *
+ * These handlers are guarded by `AdminGuard` and mutate on‑chain state or
+ * persistent storage; they therefore require explicit admin authorization.
+ */
 export class MarketController {
   constructor(
     private readonly markets: MarketService,

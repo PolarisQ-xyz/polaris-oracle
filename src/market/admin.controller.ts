@@ -141,7 +141,41 @@ export class AdminController {
       balanceStroops: balance.toString(),
       totalDepositedStroops: totalDeposited.toString(),
       recentWithdrawals: this.activity.getRecentVaultFlows(parseLimit(limit)),
+      failedRedemptions: this.activity.getFailedVaultRedemptions(),
     };
+  }
+
+  /** Manually retries a vault redemption (redeem_from_market) that failed automatically on a market's 'finalized' event. */
+  @Get('treasury/retry-redeem')
+  async retryRedeem(@Query('marketContractId') marketContractId: string) {
+    const vaultContract = this.config.get<string>('vaultContract');
+    if (!vaultContract) {
+      return { ok: false as const, error: 'VAULT_CONTRACT not configured' };
+    }
+    try {
+      const txHash = await this.stellar.vaultRedeemFromMarket(vaultContract, marketContractId);
+      this.activity.recordVaultFlow({
+        vaultContractId: vaultContract,
+        amountStroops: '0',
+        marketContractId,
+        txHash,
+        direction: 'in',
+        status: 'ok',
+      });
+      return { ok: true as const, txHash };
+    } catch (err) {
+      const message = (err as Error).message;
+      this.activity.recordVaultFlow({
+        vaultContractId: vaultContract,
+        amountStroops: '0',
+        marketContractId,
+        txHash: undefined,
+        direction: 'in',
+        status: 'failed',
+        error: message,
+      });
+      return { ok: false as const, error: message };
+    }
   }
 
   /**
