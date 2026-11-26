@@ -16,6 +16,7 @@ import { ConfigService } from '@nestjs/config';
 import { MarketService } from './market.service';
 import { MarketFactoryService } from './market-factory.service';
 import { StellarService } from './stellar.service';
+import { isValidStellarAddress } from './stellar-address';
 import { FaucetService } from './faucet.service';
 import { AdminGuard } from './admin.guard';
 import { CreateMarketDto } from './dto/create-market.dto';
@@ -91,6 +92,7 @@ export class MarketController {
   async position(@Param('id') id: string, @Query('address') address: string) {
     this.validateId(id);
     if (!address) throw new BadRequestException('address query param is required');
+    if (!isValidStellarAddress(address)) throw new BadRequestException('address query param is not a valid Stellar address');
     const [yes, no] = await this.stellar.getPosition(id, address);
     return { yes: yes.toString(), no: no.toString() };
   }

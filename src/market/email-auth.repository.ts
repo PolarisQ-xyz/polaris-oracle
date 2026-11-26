@@ -55,21 +55,7 @@ export class EmailAuthRepository implements OnModuleInit, OnModuleDestroy {
     `);
   }
 
-  /** Starts the hourly sweep of expired, never-verified login codes. */
-  onModuleInit(): void {
-    this.sweepTimer = setInterval(() => this.deleteExpiredCodes(Date.now()), EXPIRED_CODE_SWEEP_MS);
-    this.sweepTimer.unref?.();
-  }
-
-  onModuleDestroy(): void {
-    if (this.sweepTimer) clearInterval(this.sweepTimer);
-  }
-
-  /** Purges codes past `expires_at` (e.g. requested but never verified); returns rows removed. */
-  deleteExpiredCodes(now: number): number {
-    return this.db.prepare('DELETE FROM email_login_codes WHERE expires_at < ?').run(now).changes;
-  }
-
+  /** Note: `attempts` is deliberately left out of the ON CONFLICT update — a resend must not reset the guess counter, or an attacker could refresh their attempt budget just by requesting a new code. */
   saveCode(email: string, codeHash: string, expiresAt: number): void {
     this.db
       .prepare(
@@ -78,7 +64,6 @@ export class EmailAuthRepository implements OnModuleInit, OnModuleDestroy {
          ON CONFLICT(email) DO UPDATE SET
            code_hash = excluded.code_hash,
            expires_at = excluded.expires_at,
-           attempts = 0,
            created_at = excluded.created_at`,
       )
       .run({ email, codeHash, expiresAt, createdAt: Date.now() });
