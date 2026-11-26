@@ -1,16 +1,22 @@
 # See https://fly.io/docs/app-guides/continuous-deployment-with-github-actions/
+#
+# Deploy only after CI passes on main.  The `workflow_run` trigger fires when
+# the named workflow completes; the `if:` guard then checks both the conclusion
+# and that this is a push to main (not a PR that happened to target main).
 
 name: Fly Deploy
 on:
-  push:
-    branches:
-      - main
-      - master
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main, master]
+
 jobs:
   deploy:
     name: Deploy app
     runs-on: ubuntu-latest
-    concurrency: deploy-group    # optional: ensure only one action runs at a time
+    concurrency: deploy-group
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: superfly/flyctl-actions/setup-flyctl@98172f70657cb3e15db199af139be99bd3e61200 # master

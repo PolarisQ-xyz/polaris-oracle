@@ -1,7 +1,8 @@
 import { IsIn, IsObject, IsOptional, IsString, Length } from 'class-validator';
 
-const SPONSORABLE_FUNCTIONS = ['buy', 'sell', 'split', 'merge', 'transfer', 'redeem'] as const;
-export type SponsorableFunction = (typeof SPONSORABLE_FUNCTIONS)[number];
+import { SPONSORABLE_FUNCTIONS, type SponsorableFunction } from '../sponsorable-functions';
+
+export type { SponsorableFunction };
 
 /**
  * Which contract's spec to encode `args` against — `buy`/`sell`/`split`/

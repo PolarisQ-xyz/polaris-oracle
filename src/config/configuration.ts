@@ -27,6 +27,16 @@ export interface AppConfig {
   /** IP-keyed limit on POST /wallets/deploy — mitigates, doesn't close, the known unauthenticated-endpoint gap (see WalletDeployRateLimiter). */
   walletDeployMaxPerHour: number;
   settleFreshnessWindowSecs: number;
+  /** Max ms to wait for a Lazer price update before timing out a settle attempt (`SETTLE_TIMEOUT_MS`, default 30 000). */
+  settleTimeoutMs: number;
+  /** Max settle/cancel attempts before giving up (`SETTLE_RETRY_ATTEMPTS`, default 3). */
+  settleRetryAttempts: number;
+  /** Ms to wait between consecutive settle retry attempts (`SETTLE_RETRY_DELAY_MS`, default 75 000). Must be less than `marketFactoryGracePeriodSecs * 1000`. */
+  settleRetryDelayMs: number;
+  /** Max attempts to read on-chain state during reconciliation (`RECONCILE_READ_ATTEMPTS`, default 3). */
+  reconcileReadAttempts: number;
+  /** Extra ms of buffer after market expiry before attempting settlement — absorbs ledger-close lag (`LEDGER_LAG_BUFFER_MS`, default 8 000). */
+  ledgerLagBufferMs: number;
   emailWalletEncKeyHex: string;
   sessionJwtSecret: string;
   sessionTtlSecs: number;
@@ -36,7 +46,14 @@ export interface AppConfig {
   emailCodeTtlSecs: number;
   emailCodeMaxAttempts: number;
   emailCodeResendCooldownSecs: number;
-  /** Only used to fill in a WebAuthn-shaped `client_data_json`/`rpIdHash` for custodial signatures — never validated on-chain (see `email-wallet-signer.ts`), so these don't need to match the frontend exactly. */
+  /**
+   * Embedded verbatim in the `client_data_json` the custodial signer produces.
+   * The smart-wallet contract validates `origin` against the value pinned in
+   * the factory at `initialize()` time — a mismatch causes every email-wallet
+   * trade to fail with `OriginMismatch`.  These **must** match the frontend
+   * origin exactly in production; the localhost defaults are safe only for
+   * local development.
+   */
   emailWalletRpId: string;
   emailWalletOrigin: string;
   vaultContract: string | undefined;
@@ -115,6 +132,8 @@ export interface AppConfig {
   mockRedstoneContract: string | undefined;
   redstoneMaxStalenessSecs: string;
   redstoneToleranceBps: number;
+  /** Warn when the oracle or deployer hot-wallet XLM balance falls below this — in stroops. Requires `NATIVE_XLM_SAC` to be set; silently skipped otherwise. */
+  oracleMinBalanceStroops: string;
 }
 
 import { randomBytes } from 'node:crypto';
@@ -151,26 +170,41 @@ const DEFAULT_FEED_CATALOG: { feedId: number; hermesFeedId: string; symbol: stri
 ];
 
 /** Parses `FEED_CATALOG` (a JSON array of `{feedId, hermesFeedId, symbol}`) — falls back to the single feed this build has always used rather than throwing, since a malformed env var shouldn't stop the whole process from booting. */
-function parseFeedCatalog(raw: string | undefined): { feedId: number; hermesFeedId: string; symbol: string }[] {
+export function parseFeedCatalog(raw: string | undefined): { feedId: number; hermesFeedId: string; symbol: string }[] {
   if (!raw) return DEFAULT_FEED_CATALOG;
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw);
-    if (
-      Array.isArray(parsed) &&
-      parsed.every(
-        (f) => typeof f?.feedId === 'number' && typeof f?.hermesFeedId === 'string' && typeof f?.symbol === 'string',
-      )
-    ) {
-      return parsed;
-    }
+    parsed = JSON.parse(raw);
   } catch {
-    // fall through to the warning + default below
+    // eslint-disable-next-line no-console
+    console.warn('[config] FEED_CATALOG is not valid JSON — falling back to the default XLM/USD-only catalog.');
+    return DEFAULT_FEED_CATALOG;
   }
-  // eslint-disable-next-line no-console
-  console.warn(
-    `[config] FEED_CATALOG is set but not a valid JSON array of {feedId, hermesFeedId, symbol} — using the default.`,
-  );
-  return DEFAULT_FEED_CATALOG;
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    // eslint-disable-next-line no-console
+    console.warn('[config] FEED_CATALOG must be a non-empty JSON array — falling back to the default XLM/USD-only catalog.');
+    return DEFAULT_FEED_CATALOG;
+  }
+  const catalog: { feedId: number; hermesFeedId: string; symbol: string }[] = [];
+  for (const entry of parsed) {
+    if (
+      typeof entry !== 'object' ||
+      entry === null ||
+      typeof (entry as Record<string, unknown>).feedId !== 'number' ||
+      typeof (entry as Record<string, unknown>).hermesFeedId !== 'string' ||
+      typeof (entry as Record<string, unknown>).symbol !== 'string'
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn('[config] FEED_CATALOG entry is missing a numeric `feedId` or string `hermesFeedId`/`symbol` — falling back to the default XLM/USD-only catalog.');
+      return DEFAULT_FEED_CATALOG;
+    }
+    catalog.push({
+      feedId: (entry as { feedId: number }).feedId,
+      hermesFeedId: (entry as { hermesFeedId: string }).hermesFeedId,
+      symbol: (entry as { symbol: string }).symbol,
+    });
+  }
+  return catalog;
 }
 
 export default (): AppConfig => ({
@@ -220,6 +254,11 @@ export default (): AppConfig => ({
   emailWalletOrigin: process.env.EMAIL_WALLET_ORIGIN ?? 'http://localhost:3000',
   vaultContract: process.env.VAULT_CONTRACT,
   feedCatalog: parseFeedCatalog(process.env.FEED_CATALOG),
+  settleTimeoutMs: Number(process.env.SETTLE_TIMEOUT_MS ?? 30_000),
+  settleRetryAttempts: Number(process.env.SETTLE_RETRY_ATTEMPTS ?? 3),
+  settleRetryDelayMs: Number(process.env.SETTLE_RETRY_DELAY_MS ?? 75_000),
+  reconcileReadAttempts: Number(process.env.RECONCILE_READ_ATTEMPTS ?? 3),
+  ledgerLagBufferMs: Number(process.env.LEDGER_LAG_BUFFER_MS ?? 8_000),
   settleOracleToleranceBps: Number(process.env.SETTLE_ORACLE_TOLERANCE_BPS ?? 150),
   reflectorContract: process.env.REFLECTOR_CONTRACT,
   reflectorAsset: process.env.REFLECTOR_ASSET ?? 'XLM',
@@ -244,4 +283,5 @@ export default (): AppConfig => ({
   mockRedstoneContract: process.env.MOCK_REDSTONE_CONTRACT,
   redstoneMaxStalenessSecs: process.env.REDSTONE_MAX_STALENESS_SECS ?? '600',
   redstoneToleranceBps: Number(process.env.REDSTONE_TOLERANCE_BPS ?? 150),
+  oracleMinBalanceStroops: process.env.ORACLE_MIN_BALANCE_STROOPS ?? '50000000', // 5 XLM
 });

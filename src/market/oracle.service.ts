@@ -34,6 +34,9 @@ export interface SignedPriceUpdate {
  * market old enough to predate `settle_via_reflector` existing on its
  * deployed wasm, or Reflector itself being unavailable/stale/divergent).
  */
+const RETRY_INITIAL_MS = 5_000;
+const RETRY_MAX_MS = 5 * 60_000;
+
 @Injectable()
 export class OracleService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(OracleService.name);
@@ -75,7 +78,16 @@ export class OracleService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn('PYTH_LAZER_TOKEN not set — settlement will use settle_via_reflector (Reflector-only, no Lazer payload) instead');
       return;
     }
+    await this.connect(token);
+  }
 
+  /**
+   * Attempts the initial connect; on failure, schedules a retry with capped
+   * exponential backoff (5s → 5min) instead of leaving `this.client`
+   * permanently `undefined` for the life of the process (see #112).
+   */
+  private async connect(token: string): Promise<void> {
+    if (this.destroyed) return;
     try {
       this.client = await PythLazerClient.create({
         token,
@@ -98,7 +110,20 @@ export class OracleService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private scheduleRetry(token: string): void {
+    if (this.destroyed) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryDelayMs = Math.min(this.retryDelayMs * 2, RETRY_MAX_MS);
+      void this.connect(token);
+    }, this.retryDelayMs);
+  }
+
   onModuleDestroy(): void {
+    this.destroyed = true;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = undefined;
+    }
     this.client?.shutdown();
   }
 
