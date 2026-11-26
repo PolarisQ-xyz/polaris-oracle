@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Logger, Query, UseGuards } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AdminGuard } from './admin.guard';
 import { MarketRepository } from './market.repository';
@@ -10,6 +10,8 @@ import { StellarService } from './stellar.service';
 import { OracleService } from './oracle.service';
 
 const DEFAULT_LIST_LIMIT = 50;
+/** Default low-balance warning threshold: 10 XLM in stroops (issue #163). */
+const DEFAULT_ORACLE_MIN_BALANCE_STROOPS = 100_000_000n;
 
 /**
  * The admin dashboard's read API — everything here is `AdminGuard`-gated
@@ -24,6 +26,8 @@ const DEFAULT_LIST_LIMIT = 50;
 @Controller('admin')
 @UseGuards(AdminGuard)
 export class AdminController {
+  private readonly logger = new Logger(AdminController.name);
+
   constructor(
     private readonly config: ConfigService,
     private readonly markets: MarketRepository,
@@ -162,22 +166,34 @@ export class AdminController {
    */
   @Get('network')
   async network() {
-    const health = await this.stellar.getNetworkHealth();
-    const nativeXlmSac = this.config.get<string>('nativeXlmSac');
-    let oracleXlmBalanceStroops: string | null = null;
-    let deployerXlmBalanceStroops: string | null = null;
-    if (nativeXlmSac) {
-      [oracleXlmBalanceStroops, deployerXlmBalanceStroops] = await Promise.all([
-        this.stellar.tokenBalance(nativeXlmSac, this.stellar.oraclePublicKey).then((b) => b.toString()).catch(() => null),
-        this.stellar.tokenBalance(nativeXlmSac, this.stellar.deployerPublicKey).then((b) => b.toString()).catch(() => null),
-      ]);
+    const minBalanceStroops =
+      BigInt(this.config.get<string>('oracleMinBalanceStroops') ?? DEFAULT_ORACLE_MIN_BALANCE_STROOPS);
+
+    const [health, oracleBalanceStroops, deployerBalanceStroops] = await Promise.all([
+      this.stellar.getNetworkHealth(),
+      this.stellar.getAccountXlmBalanceStroops(this.stellar.oraclePublicKey),
+      this.stellar.getAccountXlmBalanceStroops(this.stellar.deployerPublicKey),
+    ]);
+
+    if (oracleBalanceStroops !== null && oracleBalanceStroops < minBalanceStroops) {
+      this.logger.warn(
+        { oraclePublicKey: this.stellar.oraclePublicKey, oracleBalanceStroops: oracleBalanceStroops.toString(), minBalanceStroops: minBalanceStroops.toString() },
+        'Oracle hot-wallet XLM balance is below the minimum threshold — trades and settlement will fail when it drains',
+      );
     }
+    if (deployerBalanceStroops !== null && deployerBalanceStroops < minBalanceStroops) {
+      this.logger.warn(
+        { deployerPublicKey: this.stellar.deployerPublicKey, deployerBalanceStroops: deployerBalanceStroops.toString(), minBalanceStroops: minBalanceStroops.toString() },
+        'Deployer hot-wallet XLM balance is below the minimum threshold',
+      );
+    }
+
     return {
       ...health,
       oraclePublicKey: this.stellar.oraclePublicKey,
+      oracleBalanceStroops: oracleBalanceStroops?.toString() ?? null,
       deployerPublicKey: this.stellar.deployerPublicKey,
-      oracleXlmBalanceStroops,
-      deployerXlmBalanceStroops,
+      deployerBalanceStroops: deployerBalanceStroops?.toString() ?? null,
       contracts: {
         vaultContract: this.config.get<string>('vaultContract'),
         lazerContract: this.config.get<string>('lazerContract'),

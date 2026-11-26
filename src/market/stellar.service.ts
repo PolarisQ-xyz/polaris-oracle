@@ -339,6 +339,26 @@ export class StellarService {
   }
 
   /**
+   * Native XLM balance of an account in stroops, via `rpc.Server.getAccount()`
+   * (issue #163).  Returns `null` when the account is not found on the
+   * network — a new deployer key that has never been funded will return null
+   * rather than throw, so the caller can present a warning without crashing.
+   */
+  async getAccountXlmBalanceStroops(publicKey: string): Promise<bigint | null> {
+    try {
+      const account = await this.server.getAccount(publicKey);
+      const nativeBalance = account.balances.find(
+        (b: { asset_type: string }) => b.asset_type === 'native',
+      ) as { asset_type: 'native'; balance: string } | undefined;
+      if (!nativeBalance) return null;
+      // Stellar balances are in XLM with 7 decimal places; stroops = balance * 10_000_000
+      return BigInt(Math.round(parseFloat(nativeBalance.balance) * 10_000_000));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * One client builder for every contract this service talks to, instead
    * of a near-identical copy per contract (five of them used to exist here,
    * differing only in which `Spec` was passed — plus a sixth inline copy in
