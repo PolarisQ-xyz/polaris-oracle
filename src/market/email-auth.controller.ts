@@ -4,7 +4,6 @@ import {
   Controller,
   Get,
   HttpCode,
-  Logger,
   Post,
   Req,
   Res,
@@ -13,9 +12,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import { EmailAuthService } from './email-auth.service';
-import { StellarService } from './stellar.service';
-import { AdminActivityRepository, type WalletActionFunction } from './admin-activity.repository';
-import { feeBearingAmount } from './wire-args';
+import { TradeActivityRecorder } from './trade-activity-recorder.service';
 import { RequestEmailCodeDto } from './dto/request-email-code.dto';
 import { VerifyEmailCodeDto } from './dto/verify-email-code.dto';
 import { EmailTradeDto } from './dto/email-trade.dto';
@@ -34,13 +31,10 @@ const SESSION_COOKIE = 'polaris_session';
  */
 @Controller('auth/email')
 export class EmailAuthController {
-  private readonly logger = new Logger(EmailAuthController.name);
-
   constructor(
     private readonly emailAuth: EmailAuthService,
     private readonly config: ConfigService,
-    private readonly stellar: StellarService,
-    private readonly activity: AdminActivityRepository,
+    private readonly tradeRecorder: TradeActivityRecorder,
   ) {}
 
   @Post('request')
@@ -78,7 +72,7 @@ export class EmailAuthController {
   me(@Req() req: Request) {
     const session = this.emailAuth.verifySession(readCookie(req, SESSION_COOKIE));
     if (!session) {
-      throw new UnauthorizedException('not signed in');
+      throw new UnauthorizedException('session not found or expired');
     }
     return { email: session.email, address: session.address };
   }
@@ -87,36 +81,48 @@ export class EmailAuthController {
   async trade(@Req() req: Request, @Body() dto: EmailTradeDto) {
     const session = this.emailAuth.verifySession(readCookie(req, SESSION_COOKIE));
     if (!session) {
-      throw new UnauthorizedException('not signed in');
+      throw new UnauthorizedException('session not found or expired — sign in again before trading');
     }
-    let result: { txHash: string; walletAddress: string };
+    let result: { txHash: string; walletAddress: string; status: 'success' | 'pending' };
     try {
       result = await this.emailAuth.signAndSubmitTrade(session.email, dto.contractId, dto.function, dto.args, dto.contractKind);
     } catch (err) {
       throw new BadRequestException(messageOf(err));
     }
-    // Best-effort admin-dashboard logging — see wallet.controller.ts's
-    // `submit` handler for the identical pattern and why a failure here
-    // must never affect the real response.
-    try {
-      const feeBps = ['buy', 'sell'].includes(dto.function)
-        ? await (dto.contractKind === 'perpetual'
-            ? this.stellar.getPerpetualFee(dto.contractId)
-            : this.stellar.getFee(dto.contractId))
-        : undefined;
-      this.activity.recordWalletAction({
-        contractId: dto.contractId,
-        walletAddress: result.walletAddress,
-        functionName: dto.function as WalletActionFunction,
-        collateralAmount: feeBearingAmount(dto.function, dto.args),
-        feeBps,
-        txHash: result.txHash,
-        source: 'email',
-      });
-    } catch (err) {
-      this.logger.warn(`failed to record admin-activity row for tx ${result.txHash}: ${(err as Error).message}`);
-    }
+    // Best-effort admin-dashboard logging, fire-and-forget (see TradeActivityRecorder).
+    this.tradeRecorder.recordTrade({
+      contractId: dto.contractId,
+      function: dto.function,
+      args: dto.args,
+      contractKind: dto.contractKind,
+      walletAddress: result.walletAddress,
+      txHash: result.txHash,
+      source: 'email',
+    });
     return { txHash: result.txHash };
+  }
+
+  /**
+   * POST /email/export-key — re-authenticated custodial key export (issue #183).
+   *
+   * Returns the secp256r1 private key as a hex-encoded SEC1 DER bytes so the
+   * user can import it into any P-256-capable self-custody wallet.
+   * Rate-limited to 3 requests per hour; every export is audit-logged.
+   */
+  @Post('export-key')
+  @HttpCode(200)
+  exportKey(@Req() req: Request) {
+    const session = this.emailAuth.verifySession(readCookie(req, SESSION_COOKIE));
+    if (!session) {
+      throw new UnauthorizedException('not signed in');
+    }
+    let result: { privateKeyHex: string; walletAddress: string };
+    try {
+      result = this.emailAuth.exportPrivateKey(session.email);
+    } catch (err) {
+      throw new BadRequestException(messageOf(err));
+    }
+    return result;
   }
 
   private cookieOptions() {
@@ -141,7 +147,14 @@ function readCookie(req: Request, name: string): string | undefined {
     const eq = part.indexOf('=');
     if (eq === -1) continue;
     if (part.slice(0, eq).trim() === name) {
-      return decodeURIComponent(part.slice(eq + 1).trim());
+      const raw = part.slice(eq + 1).trim();
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        // A malformed percent-encoding (e.g. a stray/tampered cookie) must
+        // not 500 the request — treat it as "no session cookie" instead.
+        return undefined;
+      }
     }
   }
   return undefined;
