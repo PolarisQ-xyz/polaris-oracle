@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
+import * as jwt from 'jsonwebtoken';
 import { EmailAuthService } from './email-auth.service';
 
 // Hand-rolled fakes rather than a Nest TestingModule — mirrors the pattern

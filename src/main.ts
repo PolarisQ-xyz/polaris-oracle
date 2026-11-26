@@ -1,14 +1,29 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { ValidationPipe, Logger } from '@nestjs/common';
+import type { NestExpressApplication } from '@nestjs/platform-express';
+import type { Request, Response, NextFunction } from 'express';
 import { AppModule } from './app.module';
+import { AppLoggerService } from './logger.service';
 import { resolveCorsOrigins } from './cors-origins';
+import { RequestLoggerInterceptor } from './request-logger.interceptor';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, { logger: new AppLoggerService() });
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }),
   );
+  app.useGlobalInterceptors(new RequestLoggerInterceptor());
+
+  // Behind Fly.io's edge proxy, Express reports the proxy's own address as
+  // req.ip unless told how many trusted hops sit in front of the app. That
+  // breaks WalletDeployRateLimiter (keyed on req.ip): every request looks
+  // like it comes from the same IP, so the limiter bucket is effectively
+  // global instead of per-client. Trust exactly one hop by default (Fly's
+  // proxy) — never `true`, which would trust an arbitrary client-supplied
+  // X-Forwarded-For and let a request pick its own rate-limit bucket.
+  const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS ?? 1);
+  app.getHttpAdapter().getInstance().set('trust proxy', trustProxyHops);
 
   const origins = resolveCorsOrigins(process.env.CORS_ORIGINS);
   if (origins.length === 0) {
@@ -38,6 +53,16 @@ async function bootstrap() {
     credentials: true,
   });
 
+  // Defense-in-depth security headers for a JSON API (issue #26).
+  // No helmet dependency needed; these are the defaults helmet would set.
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+    next();
+  });
+
   const port = Number(process.env.PORT ?? 3000);
   // Fly.io's proxy reaches machines over private IPv6 — an IPv4-only bind
   // ('0.0.0.0' or omitted) is unreachable despite the process reporting
@@ -47,4 +72,19 @@ async function bootstrap() {
   console.log(`polaris-oracle listening on [::]:${port}`);
 }
 
-bootstrap();
+// Node ≥15 turns unhandled promise rejections into uncaught exceptions that
+// crash the process — but the message is a generic "unhandledRejection" dump.
+// Catch them here so we can log a structured message before the process exits,
+// making it clear what crashed (boot failure, misconfig, etc.) rather than
+// forcing the operator to parse a Node stack dump. (#168)
+process.on('unhandledRejection', (reason) => {
+  // eslint-disable-next-line no-console
+  console.error('[polaris-oracle] unhandled promise rejection — process will exit:', reason);
+  process.exitCode = 1;
+});
+
+bootstrap().catch((err) => {
+  // eslint-disable-next-line no-console
+  console.error('[polaris-oracle] bootstrap() failed — process will exit:', err);
+  process.exit(1);
+});

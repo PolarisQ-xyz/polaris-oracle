@@ -22,10 +22,12 @@ export class CreateMarketDto {
    */
   @IsInt()
   @Min(0)
+  @Max(1000)
   baseFeeBps!: number;
 
   @IsInt()
   @Min(0)
+  @Max(1000)
   minFeeBps!: number;
 
   /** Collateral pulled from the oracle keypair to seed the AMM pool, in stroops. */

@@ -42,6 +42,7 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
   // starting a create — checked+added synchronously with hasOpenMarket in
   // rollFeed, so there's no await between the check and the reservation.
   private readonly rolling = new Set<number>();
+  private paused = false;
 
   constructor(
     private readonly repo: MarketRepository,
@@ -52,7 +53,39 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     private readonly activity: AdminActivityRepository,
   ) {}
 
+  // ---- factory pause/resume (issue #179) -----------------------------------
+  // In-memory flag backed by SQLite so the paused state survives restarts.
+  // The flag is loaded eagerly in onModuleInit before the timer starts, so
+  // a restart after a pause keeps the factory stopped without operator
+  // intervention.
+  private paused = false;
+
+  /** Pause the factory; persists across restarts. Returns the new state. */
+  pause(): { paused: true } {
+    this.paused = true;
+    this.activity.setFlag('factory_paused', '1');
+    this.logger.warn('Market factory PAUSED by admin');
+    return { paused: true };
+  }
+
+  /** Resume the factory. Returns the new state. */
+  resume(): { paused: false } {
+    this.paused = false;
+    this.activity.setFlag('factory_paused', '0');
+    this.logger.log('Market factory RESUMED by admin');
+    return { paused: false };
+  }
+
+  /** Current pause state (for the admin overview). */
+  isPaused(): boolean {
+    return this.paused;
+  }
+
   onModuleInit(): void {
+    // Restore persisted pause state before arming the timer (issue #179).
+    this.paused = this.activity.getFlag('factory_paused') === '1';
+    if (this.paused) this.logger.warn('Market factory starting in PAUSED state (persisted from prior run)');
+
     // Relies on MarketService.onModuleInit() never emitting 'finalized'
     // *synchronously* during Nest's provider-init tick — true today, since
     // its fire-and-forget trySettle/tryCancel calls are gated on real I/O
@@ -60,6 +93,7 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     // registered a few lines below in the same synchronous tick.
     this.events.on('finalized', (m: WatchedMarket) => {
       try {
+        void this.redeemFromMarket(m);
         const entry = this.catalogEntry(m.feedId);
         if (entry) void this.rollFeed(entry);
       } catch (err) {
@@ -96,6 +130,7 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
    * timers.
    */
   async run(): Promise<MarketFactoryRunResult> {
+    await this.checkHotWalletBalances();
     const catalog = this.config.get<FeedCatalogEntry[]>('feedCatalog') ?? [];
     const result: MarketFactoryRunResult = { created: [], skipped: [], failed: [] };
 
@@ -115,6 +150,20 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
    * 'finalized' event call, so there's exactly one place that can start a
    * creation, not two independently-maintained ones.
    */
+  pause(): void {
+    this.paused = true;
+    this.logger.warn('market factory paused');
+  }
+
+  resume(): void {
+    this.paused = false;
+    this.logger.log('market factory resumed');
+  }
+
+  isPaused(): boolean {
+    return this.paused;
+  }
+
   private async rollFeed(
     entry: FeedCatalogEntry,
   ): Promise<
@@ -122,19 +171,75 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     | { status: 'failed'; error: string }
     | { status: 'created'; contractId: string; strikePriceCents: string }
   > {
-    if (this.hasOpenMarket(entry.feedId) || this.rolling.has(entry.feedId)) {
+    // Return 'skipped' while paused so the caller's result list reflects the
+    // factory is intentionally not creating markets (issue #179).
+    if (this.paused || this.hasOpenMarket(entry.feedId) || this.rolling.has(entry.feedId)) {
       return { status: 'skipped' };
     }
     this.rolling.add(entry.feedId);
     try {
+      const orphan = this.orphans.get(entry.feedId);
+      if (orphan) {
+        this.markets.watch(orphan);
+        this.orphans.delete(entry.feedId);
+        this.logger.warn(`re-tracked orphaned market ${orphan.contractId} for ${entry.symbol}`);
+        return { status: 'created', contractId: orphan.contractId, strikePriceCents: orphan.strikePriceCents };
+      }
       const { contractId, strikePriceCents } = await this.createMarketFor(entry);
+      this.repo.recordFactoryRun({ feedId: entry.feedId, outcome: 'created', contractId });
       return { status: 'created', contractId, strikePriceCents: strikePriceCents.toString() };
     } catch (err) {
       const message = (err as Error).message;
       this.logger.error(`market factory failed for ${entry.symbol}: ${message}`);
+      this.repo.recordFactoryRun({ feedId: entry.feedId, outcome: 'failed', error: message });
       return { status: 'failed', error: message };
     } finally {
       this.rolling.delete(entry.feedId);
+    }
+  }
+
+  /**
+   * The counterpart to `createMarketFor`'s `vaultWithdraw`: a finalized
+   * market's remaining payout has to be explicitly redeemed back into the
+   * vault's shared custody, or the capital never returns and the vault
+   * drains on a fixed schedule (one `MARKET_FACTORY_INITIAL_LIQUIDITY_STROOPS`
+   * per rolled market). Only runs for factory-created markets — one whose
+   * on-chain `treasury` is this vault; a manually created market
+   * (`treasury` != vault) is skipped, matching `POST /markets/create`'s own
+   * "manual ops are manual" scope.
+   */
+  private async redeemFromMarket(m: WatchedMarket): Promise<void> {
+    const vaultContract = this.config.get<string>('vaultContract');
+    if (!vaultContract) return;
+    try {
+      const state = await this.stellar.getMarketState(m.contractId);
+      if (state.treasury !== vaultContract) return;
+      const txHash = await this.stellar.vaultRedeemFromMarket(vaultContract, m.contractId);
+      this.activity.recordVaultFlow({
+        vaultContractId: vaultContract,
+        amountStroops: '0',
+        marketContractId: m.contractId,
+        txHash,
+        direction: 'in',
+        status: 'ok',
+      });
+      this.logger.log(`redeemed finalized market ${m.contractId} back into vault ${vaultContract} (tx ${txHash})`);
+    } catch (err) {
+      const message = (err as Error).message;
+      this.logger.error(`vault redeem_from_market failed for ${m.contractId}: ${message}`);
+      try {
+        this.activity.recordVaultFlow({
+          vaultContractId: vaultContract,
+          amountStroops: '0',
+          marketContractId: m.contractId,
+          txHash: undefined,
+          direction: 'in',
+          status: 'failed',
+          error: message,
+        });
+      } catch {
+        // best-effort logging only, never let this mask the original failure
+      }
     }
   }
 
@@ -143,10 +248,12 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     return catalog.find((e) => e.feedId === feedId);
   }
 
+  /** Returns true if any market for this feed is in a non-terminal state (watching or pending), preventing duplicate creation. */
   private hasOpenMarket(feedId: number): boolean {
     return this.repo.getByFeedId(feedId).some((m) => m.status === 'watching' || m.status === 'pending');
   }
 
+  /** Withdraws seed liquidity from the vault and deploys a new market contract for the given feed catalog entry. */
   private async createMarketFor(entry: FeedCatalogEntry): Promise<{ contractId: string; strikePriceCents: bigint }> {
     const vaultContract = this.config.get<string>('vaultContract');
     const lazerContract = this.config.get<string>('lazerContract');
@@ -158,9 +265,6 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
-    const strikePriceCents = await this.fetchStrikePriceCents(entry, reflectorContract);
-    const now = Math.floor(Date.now() / 1000);
-    const expiry = now + this.config.get<number>('marketFactoryExpirySecs')!;
     const gracePeriodSecs = this.config.get<number>('marketFactoryGracePeriodSecs')!;
     const initialLiquidityStroops = BigInt(this.config.get<string>('marketFactoryInitialLiquidityStroops')!);
 
@@ -169,6 +273,11 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
     // deployMarket never runs, so there's no partially-funded market left
     // behind. See the module doc: every entry fails independently.
     const withdrawTxHash = await this.stellar.vaultWithdraw(vaultContract, initialLiquidityStroops);
+
+    // Strike and expiry are taken right before deploy, after the withdraw
+    // round trip, so neither is stale by the time the market opens.
+    const strikePriceCents = await this.fetchStrikePriceCents(entry, reflectorContract);
+    const expiry = Math.floor(Date.now() / 1000) + this.config.get<number>('marketFactoryExpirySecs')!;
 
     const { contractId } = await this.stellar.deployMarket({
       strikePriceCents,
@@ -190,13 +299,22 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
       reflectorToleranceBps: this.config.get<number>('reflectorToleranceBps')!,
     });
 
-    this.markets.watch({
+    const watched = {
       contractId,
       strikePriceCents: strikePriceCents.toString(),
       expiry,
       gracePeriodSecs,
       feedId: entry.feedId,
-    });
+    };
+    try {
+      this.markets.watch(watched);
+    } catch (err) {
+      this.orphans.set(entry.feedId, watched);
+      this.logger.error(
+        `deployed market ${contractId} for feed ${entry.feedId} but watch() failed; will retry next sweep: ${(err as Error).message}`,
+      );
+      throw err;
+    }
 
     // Best-effort admin-dashboard logging, once the market that withdrawal
     // actually funded is known — see AdminActivityRepository's doc comment:
@@ -234,6 +352,31 @@ export class MarketFactoryService implements OnModuleInit, OnModuleDestroy {
    * (timeout, malformed response, missing catalog entry) still falls
    * through to this same path unchanged.
    */
+  /** Logs a warning when the oracle or deployer hot-wallet XLM balance is below the configured threshold. Called once per factory interval. Requires `nativeXlmSac` to be configured; silently skips otherwise. */
+  private async checkHotWalletBalances(): Promise<void> {
+    const nativeXlmSac = this.config.get<string>('nativeXlmSac');
+    if (!nativeXlmSac) return;
+    const minStroops = BigInt(this.config.get<string>('oracleMinBalanceStroops') ?? '50000000');
+    const wallets: { label: string; address: string }[] = [
+      { label: 'oracle', address: this.stellar.oraclePublicKey },
+      { label: 'deployer', address: this.stellar.deployerPublicKey },
+    ];
+    await Promise.allSettled(
+      wallets.map(async ({ label, address }) => {
+        try {
+          const balance = await this.stellar.tokenBalance(nativeXlmSac, address);
+          if (balance < minStroops) {
+            this.logger.warn(
+              `${label} hot-wallet XLM balance low: ${balance} stroops (threshold: ${minStroops}) — trades, settlement, and wallet deploys may fail`,
+            );
+          }
+        } catch (err) {
+          this.logger.warn(`failed to read ${label} hot-wallet XLM balance: ${(err as Error).message}`);
+        }
+      }),
+    );
+  }
+
   private async fetchStrikePriceCents(entry: FeedCatalogEntry, reflectorContract: string): Promise<bigint> {
     const hermesUrl = this.config.get<string>('pythHermesUrl')!;
     try {
