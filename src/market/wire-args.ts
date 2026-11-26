@@ -1,5 +1,12 @@
+import { BadRequestException } from '@nestjs/common';
 import { contract as StellarContract, type xdr } from '@stellar/stellar-sdk';
 import { SPONSORABLE_FUNCTIONS, type SponsorableFunction } from './sponsorable-functions';
+
+const SIGNED_INT_RE = /^-?\d+$/;
+const UNSIGNED_INT_RE = /^\d+$/;
+const HEX_RE = /^([0-9a-fA-F]{2})*$/;
+
+const UNSIGNED_INT_TYPES = new Set(['scSpecTypeU128', 'scSpecTypeU64']);
 
 /**
  * JSON-transportable argument values from an HTTP request body: plain
@@ -98,6 +105,12 @@ export function coerceWireArgs(
 ): Record<string, unknown> {
   const func = spec.getFunc(functionName);
   const out: Record<string, unknown> = {};
+  const validNames = new Set(func.inputs().map((input) => input.name().toString()));
+  for (const key of Object.keys(wireArgs)) {
+    if (!validNames.has(key)) {
+      throw new BadRequestException(`unknown arg: ${key}`);
+    }
+  }
 
   for (const input of func.inputs()) {
     const name = input.name().toString();
@@ -111,14 +124,21 @@ export function coerceWireArgs(
       case 'scSpecTypeI128':
       case 'scSpecTypeU128':
       case 'scSpecTypeI64':
-      case 'scSpecTypeU64':
-        out[name] = BigInt(raw as string);
+      case 'scSpecTypeU64': {
+        const re = UNSIGNED_INT_TYPES.has(typeName) ? UNSIGNED_INT_RE : SIGNED_INT_RE;
+        if (typeof raw !== 'string' || !re.test(raw)) {
+          const kind = UNSIGNED_INT_TYPES.has(typeName) ? 'a non-negative integer' : 'an integer';
+          throw new BadRequestException(`${name} must be ${kind} string`);
+        }
+        out[name] = BigInt(raw);
         break;
+      }
       case 'scSpecTypeBytes':
-        out[name] = Buffer.from(raw as string, 'hex');
-        break;
       case 'scSpecTypeBytesN':
-        out[name] = Buffer.from(raw as string, 'hex');
+        if (typeof raw !== 'string' || !HEX_RE.test(raw)) {
+          throw new BadRequestException(`${name} must be a valid hex string`);
+        }
+        out[name] = Buffer.from(raw, 'hex');
         break;
       case 'scSpecTypeUdt': {
         const udtName = input.type().udt().name().toString();

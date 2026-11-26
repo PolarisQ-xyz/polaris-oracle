@@ -17,6 +17,7 @@ import { AuthRelayService } from './auth-relay.service';
 import { WalletDeployRateLimiter } from './wallet-deploy-rate-limiter.service';
 import { TradeActivityRecorder } from './trade-activity-recorder.service';
 import { DeployWalletDto } from './dto/deploy-wallet.dto';
+import { ResolveWalletQueryDto } from './dto/resolve-wallet-query.dto';
 import { PrepareAuthDto } from './dto/prepare-auth.dto';
 import { SubmitAuthDto } from './dto/submit-auth.dto';
 
@@ -42,15 +43,12 @@ export class WalletController {
    * a bettor in. Free (a simulated read), not a transaction.
    */
   @Get('resolve')
-  async resolve(@Query('publicKeyHex') publicKeyHex: string) {
+  async resolve(@Query() query: ResolveWalletQueryDto) {
     const factoryId = this.config.get<string>('smartWalletFactoryContract');
-    if (!publicKeyHex) {
-      throw new BadRequestException('publicKeyHex query param is required');
-    }
     if (!factoryId) {
       throw new BadRequestException('SMART_WALLET_FACTORY_CONTRACT must be configured to resolve wallets');
     }
-    const address = await this.stellar.resolveWallet(factoryId, Buffer.from(publicKeyHex, 'hex'));
+    const address = await this.stellar.resolveWallet(factoryId, Buffer.from(query.publicKeyHex, 'hex'));
     return { address };
   }
 

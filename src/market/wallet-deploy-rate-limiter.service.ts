@@ -1,8 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SlidingWindowLimiter } from './sliding-window-limiter';
 
 const HOUR_MS = 60 * 60 * 1000;
+const SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 
 /**
  * Same in-memory sliding-window shape as `FaucetService`, keyed by
@@ -16,13 +17,32 @@ const HOUR_MS = 60 * 60 * 1000;
  * claim of real abuse resistance.
  */
 @Injectable()
-export class WalletDeployRateLimiter {
-  private readonly limiter = new SlidingWindowLimiter(
-    () => this.config.get<number>('walletDeployMaxPerHour')!,
-    HOUR_MS,
-  );
+export class WalletDeployRateLimiter implements OnModuleDestroy {
+  private readonly hits = new Map<string, number[]>();
+  private readonly sweepTimer: NodeJS.Timeout;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(private readonly config: ConfigService) {
+    this.sweepTimer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
+  }
+
+  onModuleDestroy(): void {
+    clearInterval(this.sweepTimer);
+  }
+
+  /** Clears entries whose window has fully emptied, so a one-shot-per-IP
+   * abuser (or a legitimate one-time deployer) doesn't occupy this map
+   * forever (see #113). */
+  private sweep(): void {
+    const now = Date.now();
+    for (const [key, hits] of this.hits) {
+      const recent = hits.filter((t) => now - t < HOUR_MS);
+      if (recent.length === 0) {
+        this.hits.delete(key);
+      } else if (recent.length !== hits.length) {
+        this.hits.set(key, recent);
+      }
+    }
+  }
 
   tryConsume(ip: string): boolean {
     return this.limiter.tryConsume(ip);
