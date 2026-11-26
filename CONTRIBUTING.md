@@ -38,6 +38,46 @@ npm test          # 130 unit tests
 npm run lint
 ```
 
+## Running against a local Stellar quickstart
+
+By default `src/config/configuration.ts` points at public testnet
+(`soroban-testnet.stellar.org`, `friendbot.stellar.org`). Public testnet
+has rate limits, periodic resets, and flaky RPC — several bugs in this
+repo were originally testnet hiccups, not code bugs. For development work
+that touches Stellar transactions, use a local quickstart instead.
+
+### Start a local quickstart node
+
+```sh
+docker run --rm -it \
+  -p 8000:8000 \
+  stellar/quickstart:latest \
+  --local \
+  --enable-soroban-rpc
+```
+
+This exposes:
+- Horizon: `http://localhost:8000`
+- Soroban RPC: `http://localhost:8000/soroban/rpc`
+- Friendbot: `http://localhost:8000/friendbot`
+
+### Configure the server to use it
+
+Create a `.env` file (copy `.env.example`) and set:
+
+```env
+STELLAR_NETWORK=local
+HORIZON_URL=http://localhost:8000
+SOROBAN_RPC_URL=http://localhost:8000/soroban/rpc
+FRIENDBOT_URL=http://localhost:8000/friendbot
+```
+
+The server will use these values in place of the testnet defaults. There
+is no reset risk, no rate limit, and no shared state with other
+contributors. Contract IDs from a local deployment are different from
+testnet ones, so update `VAULT_CONTRACT`, `LAZER_CONTRACT`, and
+`REFLECTOR_CONTRACT` to point at your locally-deployed instances.
+
 ## Communication
 
 Discussion happens in GitHub issues and pull requests. There's no
