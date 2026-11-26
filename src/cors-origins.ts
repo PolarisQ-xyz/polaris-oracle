@@ -35,16 +35,23 @@ export function resolveCorsOrigins(envValue: string | undefined): string[] {
     .split(',')
     .map((o) => o.trim())
     .filter(Boolean)
-    .filter((o) => {
-      if (!isValidOrigin(o)) {
-        // Log but don't throw — a misconfigured entry silently never matches
-        // (keeping the closed-by-default guarantee) but should be visible.
+    .map((o) => {
+      // Strip a trailing slash so "https://app.example.com/" matches the
+      // browser Origin "https://app.example.com".
+      const normalized = o.endsWith('/') ? o.slice(0, -1) : o;
+      // Warn about entries that can never match a browser Origin header.
+      if (normalized === '*') {
         console.warn(
-          `[cors] ignoring malformed CORS_ORIGINS entry ${JSON.stringify(o)}: ` +
-            `expected a bare origin like 'https://app.example.com' (no trailing slash, path, or wildcard)`,
+          'cors-origins: "*" in CORS_ORIGINS does not enable wildcard mode — ' +
+            'it is treated as a literal origin and will never match. ' +
+            'Remove it or set CORS_ORIGINS to a comma-separated list of exact origins.',
         );
-        return false;
+      } else if (normalized.includes('/')) {
+        console.warn(
+          `cors-origins: "${normalized}" contains a path and will never match a browser Origin header. ` +
+            'Origins must be scheme+host+optional-port only (e.g. "https://app.example.com").',
+        );
       }
-      return true;
+      return normalized;
     });
 }

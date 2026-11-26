@@ -13,6 +13,15 @@ const DEFAULT_LIST_LIMIT = 50;
 /** Default low-balance warning threshold: 10 XLM in stroops (issue #163). */
 const DEFAULT_ORACLE_MIN_BALANCE_STROOPS = 100_000_000n;
 
+function maskEmail(email: string): string {
+  const at = email.indexOf('@');
+  if (at <= 0) return '***';
+  const local = email.slice(0, at);
+  const domain = email.slice(at);
+  const visible = local.slice(0, 1);
+  return `${visible}***${domain}`;
+}
+
 /**
  * The admin dashboard's read API — everything here is `AdminGuard`-gated
  * and read-only (the existing market-lifecycle admin actions — create,
@@ -146,9 +155,8 @@ export class AdminController {
   wallets() {
     const passkeyAddresses = this.activity.getDistinctWalletAddresses();
     const emailWallets = this.emailWallets.getAllWallets().map((w) => ({
-      // Masked to `u***@domain` — the full address list is one shared-secret
-      // header away (no per-admin lockout), so we return only enough to
-      // identify the account visually without exposing a full email dump.
+      // Mask the email (j***@example.com) to minimise exposure in dashboard
+      // screenshots and browser dev-tools. Full emails remain in the DB for ops.
       email: maskEmail(w.email),
       address: w.address,
       createdAt: w.created_at,

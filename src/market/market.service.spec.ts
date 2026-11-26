@@ -308,6 +308,32 @@ describe('MarketService — settlement orchestration', () => {
     }
   });
 
+  it("emits 'finalized' exactly once — only on the transition into a terminal state", async () => {
+    const repo = makeRepo();
+    const stellar = { settle: jest.fn().mockResolvedValue('TXFINALIZED'), cancel: jest.fn() };
+    const oracle = {
+      isAvailable: true,
+      waitForUpdate: jest.fn().mockResolvedValue({ payload: Buffer.from('x'), priceCents: undefined }),
+    };
+    const events = new MarketEvents();
+    const finalizedHandler = jest.fn();
+    events.on('finalized', finalizedHandler);
+    const svc = new MarketService(repo, stellar as any, oracle as any, {} as ConfigService, events, makeActivity());
+
+    const m = svc.watch(sample());
+    await flushMicrotasks();
+
+    // Should have transitioned to 'settled' and emitted exactly once.
+    expect(svc.get(m.contractId)?.status).toBe('settled');
+    expect(finalizedHandler).toHaveBeenCalledTimes(1);
+    expect(finalizedHandler.mock.calls[0][0].contractId).toBe(m.contractId);
+
+    // A second persist on an already-terminal market must NOT re-emit.
+    await svc.triggerSettle(m.contractId);
+    await flushMicrotasks();
+    expect(finalizedHandler).toHaveBeenCalledTimes(1);
+  });
+
   it('does not re-settle or re-cancel an already-finalized market', async () => {
     const repo = makeRepo();
     const stellar = { settle: jest.fn(), cancel: jest.fn() };
