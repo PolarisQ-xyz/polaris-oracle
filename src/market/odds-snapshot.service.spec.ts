@@ -44,6 +44,24 @@ describe('OddsSnapshotService.run()', () => {
     expect(snapshots.pruneOlderThan).toHaveBeenCalled();
   });
 
+  it('snapshots pending markets (still Open on-chain) but not settled or cancelled ones', async () => {
+    const markets = {
+      list: jest.fn().mockReturnValue([
+        watchedMarket({ contractId: 'C1', status: 'pending' }),
+        watchedMarket({ contractId: 'C2', status: 'settled' }),
+        watchedMarket({ contractId: 'C3', status: 'cancelled' }),
+      ]),
+    } as unknown as MarketService;
+    const stellar = { getPrice: jest.fn().mockResolvedValue({ yesBps: 6000, noBps: 4000 }) } as unknown as StellarService;
+    const snapshots = { record: jest.fn(), pruneOlderThan: jest.fn() } as unknown as OddsSnapshotRepository;
+
+    const svc = new OddsSnapshotService(markets, stellar, snapshots, makeConfig());
+    await svc.run();
+
+    expect(snapshots.record).toHaveBeenCalledTimes(1);
+    expect(snapshots.record).toHaveBeenCalledWith('C1', 6000, 4000);
+  });
+
   it('a failed price read for one market does not stop the rest from being recorded', async () => {
     const markets = {
       list: jest.fn().mockReturnValue([

@@ -24,6 +24,7 @@ function makeController(opts: {
     {} as FaucetService,
     config,
     oddsSnapshots,
+    { recordAdminAction: jest.fn() } as unknown as import('./admin-activity.repository').AdminActivityRepository,
   );
   return { controller, oddsSnapshots };
 }

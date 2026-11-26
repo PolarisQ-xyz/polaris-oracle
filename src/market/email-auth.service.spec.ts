@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'node:crypto';
+import * as jwt from 'jsonwebtoken';
 import { EmailAuthService } from './email-auth.service';
 
 // Hand-rolled fakes rather than a Nest TestingModule — mirrors the pattern
@@ -125,5 +126,74 @@ describe('EmailAuthService — auto-funding a freshly created wallet', () => {
     expect(result.address).toBe('CEXISTINGWALLET');
     expect(stellar.deployWallet).not.toHaveBeenCalled();
     expect(faucet.tryConsume).not.toHaveBeenCalled();
+  });
+});
+
+describe('EmailAuthService.requestCode — resend cooldown', () => {
+  const email = 'cooldown@example.com';
+  const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
+
+  // In-memory stand-in for EmailAuthRepository with the same upsert semantics as saveCode.
+  function setup() {
+    const rows = new Map<string, any>();
+    const repo = {
+      getCode: jest.fn((e: string) => rows.get(e)),
+      saveCode: jest.fn((e: string, codeHash: string, expiresAt: number) => {
+        rows.set(e, { email: e, code_hash: codeHash, expires_at: expiresAt, attempts: 0, created_at: Date.now() });
+      }),
+      deleteCode: jest.fn((e: string) => rows.delete(e)),
+      incrementAttempts: jest.fn(),
+      getWallet: jest.fn().mockReturnValue(undefined),
+      saveWallet: jest.fn(),
+    };
+    const stellar = { deployWallet: jest.fn().mockResolvedValue('CWALLET') };
+    const faucet = { tryConsume: jest.fn().mockReturnValue(false), fund: jest.fn() };
+    const sender = { send: jest.fn() };
+    const svc = new EmailAuthService(config(), repo as any, stellar as any, {} as any, faucet as any, sender as any);
+    const sentCode = (call: number) => /sign-in code is (\d{6})/.exec(sender.send.mock.calls[call][2])![1];
+    return { svc, rows, sender, sentCode };
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-01-01T00:00:00Z'));
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('rejects a second request inside the cooldown with the remaining wait, without sending', async () => {
+    const { svc, sender } = setup();
+    await svc.requestCode(email);
+
+    jest.advanceTimersByTime(20_000);
+    await expect(svc.requestCode(email)).rejects.toThrow('Please wait 40s');
+    expect(sender.send).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows a request after the cooldown and replaces the stored code', async () => {
+    const { svc, sender, sentCode } = setup();
+    await svc.requestCode(email);
+    const oldCode = sentCode(0);
+
+    jest.advanceTimersByTime(60_000);
+    await svc.requestCode(email);
+    expect(sender.send).toHaveBeenCalledTimes(2);
+    const newCode = sentCode(1);
+
+    // 1-in-900k chance the random codes collide; skip the stale-code check then.
+    if (oldCode !== newCode) {
+      await expect(svc.verifyCode(email, oldCode)).rejects.toThrow('Incorrect code.');
+    }
+    await expect(svc.verifyCode(email, newCode)).resolves.toMatchObject({ address: 'CWALLET' });
+  });
+
+  it('stores the SHA-256 of the code, never the plaintext', async () => {
+    const { svc, rows, sentCode } = setup();
+    await svc.requestCode(email);
+
+    const code = sentCode(0);
+    const row = rows.get(email);
+    expect(row.code_hash).toBe(sha256(code));
+    expect(row.code_hash).not.toContain(code);
   });
 });

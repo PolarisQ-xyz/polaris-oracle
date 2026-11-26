@@ -2,6 +2,7 @@ import { BadRequestException, Body, Controller, Get, HttpCode, Logger, NotFoundE
 import { ConfigService } from '@nestjs/config';
 import { PerpetualService } from './perpetual.service';
 import { StellarService } from './stellar.service';
+import { isValidStellarAddress } from './stellar-address';
 import { OracleService } from './oracle.service';
 import { AdminGuard } from './admin.guard';
 import { AdminActivityRepository } from './admin-activity.repository';
@@ -18,6 +19,25 @@ import { CreatePerpetualDto } from './dto/create-perpetual.dto';
  * here is a one-shot admin action.
  */
 @Controller('perpetuals')
+/**
+ * Admin action handlers for Perpetual lifecycle management.
+ *
+ * - `create`   : Deploys a new perpetual contract and registers it.
+ *                Preconditions: valid DTO, vault funding available.
+ *                Side effects: on-chain deployment, repository insertion.
+ *
+ * - `doCheckpoint` : Records an informational price checkpoint on-chain.
+ *                     Preconditions: perpetual must be active. Side effects:
+ *                     on-chain `checkpoint` call, audit log entry.
+ *
+ * - `terminate` : Winds down a perpetual, distributing remaining assets.
+ *                Preconditions: perpetual in active state. Side effects:
+ *                on-chain termination, status update, possible fund
+ *                redistribution.
+ *
+ * These admin routes are protected by `AdminGuard` because they modify
+ * on‑chain state or internal tracking.
+ */
 export class PerpetualController {
   private readonly logger = new Logger(PerpetualController.name);
 
@@ -59,6 +79,7 @@ export class PerpetualController {
   @Get(':id/position')
   async position(@Param('id') id: string, @Query('address') address: string) {
     if (!address) throw new BadRequestException('address query param is required');
+    if (!isValidStellarAddress(address)) throw new BadRequestException('address query param is not a valid Stellar address');
     const [yes, no] = await this.stellar.getPerpetualPosition(id, address);
     return { yes: yes.toString(), no: no.toString() };
   }
@@ -92,6 +113,7 @@ export class PerpetualController {
     });
 
     const watched = this.perpetuals.watch(contractId);
+    this.activity.recordAdminAction({ action: 'perpetual/create', targetContractId: contractId, paramsJson: JSON.stringify(dto), result: 'ok' });
     return { ...watched, initTxHash };
   }
 
@@ -189,6 +211,7 @@ export class PerpetualController {
     }
     await this.stellar.refreshMockRedstonePrice(mockRedstoneContract, priceCents);
     const txHash = await this.stellar.recordPriceCheckpoint(id, payload);
+    this.activity.recordAdminAction({ action: 'perpetual/checkpoint', targetContractId: id, result: txHash });
     return { txHash, ...(await this.stellar.getPerpetualState(id)) };
   }
 
@@ -206,6 +229,7 @@ export class PerpetualController {
     // own function kind rather than folded into fee-revenue accounting —
     // see AdminController.feeRevenue()'s doc comment on why only
     // buy/sell ever pay a fee.
+    this.activity.recordAdminAction({ action: 'perpetual/terminate', targetContractId: id, result: p?.terminateTxHash ?? 'pending' });
     if (p?.terminateTxHash) {
       try {
         this.activity.recordWalletAction({

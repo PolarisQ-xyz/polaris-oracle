@@ -5,7 +5,6 @@ import {
   Get,
   HttpException,
   HttpStatus,
-  Logger,
   Post,
   Query,
   Req,
@@ -13,11 +12,12 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { Request } from 'express';
 import { StellarService } from './stellar.service';
+import { isValidStellarAddress } from './stellar-address';
 import { AuthRelayService } from './auth-relay.service';
 import { WalletDeployRateLimiter } from './wallet-deploy-rate-limiter.service';
-import { AdminActivityRepository, type WalletActionFunction } from './admin-activity.repository';
-import { feeBearingAmount } from './wire-args';
+import { TradeActivityRecorder } from './trade-activity-recorder.service';
 import { DeployWalletDto } from './dto/deploy-wallet.dto';
+import { ResolveWalletQueryDto } from './dto/resolve-wallet-query.dto';
 import { PrepareAuthDto } from './dto/prepare-auth.dto';
 import { SubmitAuthDto } from './dto/submit-auth.dto';
 
@@ -28,14 +28,12 @@ import { SubmitAuthDto } from './dto/submit-auth.dto';
  */
 @Controller('wallets')
 export class WalletController {
-  private readonly logger = new Logger(WalletController.name);
-
   constructor(
     private readonly stellar: StellarService,
     private readonly relay: AuthRelayService,
     private readonly config: ConfigService,
     private readonly deployRateLimiter: WalletDeployRateLimiter,
-    private readonly activity: AdminActivityRepository,
+    private readonly tradeRecorder: TradeActivityRecorder,
   ) {}
 
   /**
@@ -45,15 +43,12 @@ export class WalletController {
    * a bettor in. Free (a simulated read), not a transaction.
    */
   @Get('resolve')
-  async resolve(@Query('publicKeyHex') publicKeyHex: string) {
+  async resolve(@Query() query: ResolveWalletQueryDto) {
     const factoryId = this.config.get<string>('smartWalletFactoryContract');
-    if (!publicKeyHex) {
-      throw new BadRequestException('publicKeyHex query param is required');
-    }
     if (!factoryId) {
       throw new BadRequestException('SMART_WALLET_FACTORY_CONTRACT must be configured to resolve wallets');
     }
-    const address = await this.stellar.resolveWallet(factoryId, Buffer.from(publicKeyHex, 'hex'));
+    const address = await this.stellar.resolveWallet(factoryId, Buffer.from(query.publicKeyHex, 'hex'));
     return { address };
   }
 
@@ -68,6 +63,9 @@ export class WalletController {
   async balance(@Query('address') address: string) {
     if (!address) {
       throw new BadRequestException('address query param is required');
+    }
+    if (!isValidStellarAddress(address)) {
+      throw new BadRequestException('address query param is not a valid Stellar address');
     }
     const nativeXlmSac = this.config.get<string>('nativeXlmSac');
     if (!nativeXlmSac) {
@@ -90,6 +88,15 @@ export class WalletController {
     return { address };
   }
 
+  /** Lets a caller keep polling a submitted tx's confirmation without holding the submit request open — see AuthRelayService.submit's doc comment. */
+  @Get('tx/:hash')
+  async txStatus(@Param('hash') txHash: string) {
+    if (!/^[0-9a-f]{64}$/i.test(txHash)) {
+      throw new BadRequestException('hash must be 64 hex characters');
+    }
+    return this.relay.txStatus(txHash);
+  }
+
   @Post('tx/prepare')
   async prepare(@Body() dto: PrepareAuthDto) {
     return this.relay.prepare(dto.walletAddress, dto.contractId, dto.function, dto.args, dto.contractKind);
@@ -110,29 +117,16 @@ export class WalletController {
       },
       dto.contractKind,
     );
-    // Best-effort admin-dashboard logging, after the on-chain result is
-    // already confirmed — never let this affect the real response. See
-    // AdminActivityRepository's doc comment: a read-side cache, not a
-    // second source of truth, so a failure here is just a dropped
-    // dashboard row, not something worth failing the request over.
-    try {
-      const feeBps = ['buy', 'sell'].includes(dto.function)
-        ? await (dto.contractKind === 'perpetual'
-            ? this.stellar.getPerpetualFee(dto.contractId)
-            : this.stellar.getFee(dto.contractId))
-        : undefined;
-      this.activity.recordWalletAction({
-        contractId: dto.contractId,
-        walletAddress: result.walletAddress,
-        functionName: dto.function as WalletActionFunction,
-        collateralAmount: feeBearingAmount(dto.function, dto.args),
-        feeBps,
-        txHash: result.txHash,
-        source: 'passkey',
-      });
-    } catch (err) {
-      this.logger.warn(`failed to record admin-activity row for tx ${result.txHash}: ${(err as Error).message}`);
-    }
+    // Best-effort admin-dashboard logging, fire-and-forget (see TradeActivityRecorder).
+    this.tradeRecorder.recordTrade({
+      contractId: dto.contractId,
+      function: dto.function,
+      args: dto.args,
+      contractKind: dto.contractKind,
+      walletAddress: result.walletAddress,
+      txHash: result.txHash,
+      source: 'passkey',
+    });
     return { txHash: result.txHash };
   }
 }

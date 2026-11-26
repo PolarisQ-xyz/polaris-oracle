@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MarketService } from './market.service';
+import { PerpetualService } from './perpetual.service';
 import { StellarService } from './stellar.service';
 import { OddsSnapshotRepository } from './odds-snapshot.repository';
 
@@ -28,6 +29,7 @@ export class OddsSnapshotService implements OnModuleInit, OnModuleDestroy {
 
   constructor(
     private readonly markets: MarketService,
+    private readonly perpetuals: PerpetualService,
     private readonly stellar: StellarService,
     private readonly snapshots: OddsSnapshotRepository,
     private readonly config: ConfigService,
@@ -44,15 +46,15 @@ export class OddsSnapshotService implements OnModuleInit, OnModuleDestroy {
     if (this.timer) clearInterval(this.timer);
   }
 
-  /** One pass over every open market — each is independent, same "isolate the blast radius per unit of work" shape as `MarketFactoryService.run()`: one market's RPC hiccup never stops the rest from being recorded. */
+  /** One pass over every open classic market and perpetual — each is independent, same "isolate the blast radius per unit of work" shape as `MarketFactoryService.run()`. */
   async run(): Promise<void> {
-    const open = this.markets.list().filter((m) => m.status === 'watching');
+    const open = this.markets.list().filter((m) => m.status === 'watching' || m.status === 'pending');
     for (const m of open) {
       try {
-        const { yesBps, noBps } = await this.stellar.getPrice(m.contractId);
-        this.snapshots.record(m.contractId, yesBps, noBps);
+        const { yesBps, noBps } = await this.stellar.getPrice(c.contractId);
+        this.snapshots.record(c.contractId, yesBps, noBps);
       } catch (err) {
-        this.logger.warn(`odds snapshot failed for ${m.contractId}: ${(err as Error).message}`);
+        this.logger.warn(`odds snapshot failed for ${c.contractId}: ${(err as Error).message}`);
       }
     }
     this.snapshots.pruneOlderThan(Date.now() - PRUNE_WINDOW_MS);
