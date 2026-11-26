@@ -190,6 +190,7 @@ export class AdminController {
 
     return {
       ...health,
+      oracleStatus: this.oracle.status,
       oraclePublicKey: this.stellar.oraclePublicKey,
       oracleBalanceStroops: oracleBalanceStroops?.toString() ?? null,
       deployerPublicKey: this.stellar.deployerPublicKey,

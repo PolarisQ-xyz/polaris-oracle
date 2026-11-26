@@ -6,12 +6,14 @@ import type { Request, Response, NextFunction } from 'express';
 import { AppModule } from './app.module';
 import { AppLoggerService } from './logger.service';
 import { resolveCorsOrigins } from './cors-origins';
+import { RequestLoggerInterceptor } from './request-logger.interceptor';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { logger: new AppLoggerService() });
   app.useGlobalPipes(
     new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }),
   );
+  app.useGlobalInterceptors(new RequestLoggerInterceptor());
 
   const origins = resolveCorsOrigins(process.env.CORS_ORIGINS);
   if (origins.length === 0) {
