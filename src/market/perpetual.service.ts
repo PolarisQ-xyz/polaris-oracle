@@ -35,6 +35,11 @@ export class PerpetualService {
   }
 
   watch(contractId: string): WatchedPerpetual {
+    // Re-watching an already-tracked perpetual must not reset a terminal
+    // row (e.g. 'terminated') back to 'watching' and erase its
+    // terminateTxHash — mirrors the MarketService.watch() fix.
+    const existing = this.repo.getById(contractId);
+    if (existing) return existing;
     const now = Date.now();
     const watched: WatchedPerpetual = { contractId, status: 'watching', createdAt: now, updatedAt: now };
     this.repo.upsert(watched);

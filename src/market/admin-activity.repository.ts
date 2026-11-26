@@ -23,7 +23,10 @@ export interface VaultFlowRow {
   vault_contract_id: string;
   amount_stroops: string;
   market_contract_id: string;
-  tx_hash: string;
+  tx_hash: string | null;
+  direction: 'out' | 'in';
+  status: 'ok' | 'failed';
+  error: string | null;
   created_at: number;
 }
 
@@ -98,7 +101,10 @@ export class AdminActivityRepository {
         vault_contract_id TEXT NOT NULL,
         amount_stroops TEXT NOT NULL,
         market_contract_id TEXT NOT NULL,
-        tx_hash TEXT NOT NULL,
+        tx_hash TEXT,
+        direction TEXT NOT NULL DEFAULT 'out',
+        status TEXT NOT NULL DEFAULT 'ok',
+        error TEXT,
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_vault_flows_created_at ON vault_flows(created_at);
@@ -149,14 +155,31 @@ export class AdminActivityRepository {
     vaultContractId: string;
     amountStroops: string;
     marketContractId: string;
-    txHash: string;
+    txHash: string | undefined;
+    direction?: 'out' | 'in';
+    status?: 'ok' | 'failed';
+    error?: string;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO vault_flows (vault_contract_id, amount_stroops, market_contract_id, tx_hash, created_at)
-         VALUES (@vaultContractId, @amountStroops, @marketContractId, @txHash, @createdAt)`,
+        `INSERT INTO vault_flows (vault_contract_id, amount_stroops, market_contract_id, tx_hash, direction, status, error, created_at)
+         VALUES (@vaultContractId, @amountStroops, @marketContractId, @txHash, @direction, @status, @error, @createdAt)`,
       )
-      .run({ ...flow, createdAt: Date.now() });
+      .run({
+        ...flow,
+        txHash: flow.txHash ?? null,
+        direction: flow.direction ?? 'out',
+        status: flow.status ?? 'ok',
+        error: flow.error ?? null,
+        createdAt: Date.now(),
+      });
+  }
+
+  /** Failed vault redemptions (direction 'in') — surfaced on `/admin/treasury` so an operator can retry them. */
+  getFailedVaultRedemptions(): VaultFlowRow[] {
+    return this.db
+      .prepare(`SELECT * FROM vault_flows WHERE direction = 'in' AND status = 'failed' ORDER BY created_at DESC`)
+      .all() as VaultFlowRow[];
   }
 
   recordSettlementCheck(check: {

@@ -225,6 +225,10 @@ interface VaultContractMethods {
     to: string;
     amount: bigint;
   }): Promise<StellarContract.AssembledTransaction<StellarContract.Result<void>>>;
+  redeem_from_market(args: {
+    admin: string;
+    market: string;
+  }): Promise<StellarContract.AssembledTransaction<StellarContract.Result<void>>>;
 }
 
 /**
@@ -740,6 +744,20 @@ export class StellarService implements OnModuleInit {
       sent.result.unwrap();
       return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
     });
+  }
+
+  /** Moves a finalized market's remaining payout back into the vault's shared custody — the counterpart `MarketFactoryService` never called after seeding a market via `vaultWithdraw`, leaving payouts stuck outside the vault indefinitely. */
+  async vaultRedeemFromMarket(vaultContractId: string, marketContractId: string): Promise<string> {
+    const client = this.vaultClient(vaultContractId);
+    const tx = await this.withRpcRetry(() =>
+      client.redeem_from_market({
+        admin: this.oraclePublicKey,
+        market: marketContractId,
+      }),
+    );
+    const sent = await tx.signAndSend();
+    sent.result.unwrap();
+    return sent.sendTransactionResponse?.hash ?? sent.getTransactionResponse?.txHash ?? '';
   }
 
   // ---------- market deployment (Stellar CLI) ----------

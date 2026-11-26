@@ -40,6 +40,9 @@ export interface AppConfig {
   emailWalletEncKeyHex: string;
   sessionJwtSecret: string;
   sessionTtlSecs: number;
+  /** Derived from NODE_ENV=production by default, overridable for ops flexibility. See email-auth.controller.ts's cookieOptions(). */
+  cookieSecure: boolean;
+  cookieSameSite: 'none' | 'lax';
   emailProvider: string;
   resendApiKey: string | undefined;
   emailFrom: string;
@@ -340,7 +343,17 @@ export default (): AppConfig => {
     ? requireHex32Bytes('EMAIL_WALLET_ENC_KEY', process.env.EMAIL_WALLET_ENC_KEY)
     : devFallbackSecret('EMAIL_WALLET_ENC_KEY', 32),
   sessionJwtSecret: devFallbackSecret('SESSION_JWT_SECRET', 32),
-  sessionTtlSecs: requireNumber('SESSION_TTL_SECS', 60 * 60 * 24 * 30, { min: 1 }), // 30 days
+  sessionTtlSecs: Number(process.env.SESSION_TTL_SECS ?? 60 * 60 * 24 * 30), // 30 days
+  // Cross-site (frontend on a different domain, e.g. Vercel) cookies need
+  // SameSite=None+Secure; same-site dev (localhost:3000 -> :3001) works
+  // fine with Lax and doesn't need Secure over plain http. Defaults off
+  // NODE_ENV so a production deploy without it set doesn't silently ship
+  // dev cookie flags; COOKIE_SECURE/COOKIE_SAMESITE override explicitly.
+  cookieSecure: process.env.COOKIE_SECURE
+    ? process.env.COOKIE_SECURE === 'true'
+    : process.env.NODE_ENV === 'production',
+  cookieSameSite: (process.env.COOKIE_SAMESITE ??
+    (process.env.NODE_ENV === 'production' ? 'none' : 'lax')) as 'none' | 'lax',
   // 'console' (default, logs the code — no real delivery) or 'resend'.
   emailProvider: process.env.EMAIL_PROVIDER ?? 'console',
   resendApiKey: process.env.RESEND_API_KEY,

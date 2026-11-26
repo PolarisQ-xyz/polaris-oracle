@@ -123,6 +123,18 @@ export class MarketService implements OnModuleInit {
   }
 
   watch(m: Omit<WatchedMarket, 'status' | 'createdAt' | 'updatedAt'>): WatchedMarket {
+    // Re-watching an already-tracked market must be a no-op, not a reset:
+    // overwriting status back to 'watching' would erase a terminal market's
+    // settleTxHash/last_error and re-arm() would immediately fire a doomed
+    // tryCancel/trySettle against a market that's already resolved. Only a
+    // genuinely new contractId gets inserted fresh.
+    const existing = this.repo.getById(m.contractId);
+    if (existing) {
+      if (!this.isTerminal(existing.status)) {
+        this.arm(existing);
+      }
+      return existing;
+    }
     const now = Date.now();
     const watched: WatchedMarket = { ...m, status: 'watching', createdAt: now, updatedAt: now };
     this.repo.upsert(watched);
