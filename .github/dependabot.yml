@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    # Security-critical packages get their own PRs so they are never held back
+    # by an unrelated minor bump.
+    ignore:
+      - dependency-name: "@stellar/stellar-sdk"
+        update-types: ["version-update:semver-patch", "version-update:semver-minor"]
+      - dependency-name: "@noble/curves"
+        update-types: ["version-update:semver-patch", "version-update:semver-minor"]
+      - dependency-name: "jsonwebtoken"
+        update-types: ["version-update:semver-patch", "version-update:semver-minor"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

@@ -4,6 +4,7 @@ import { MarketRepository } from './market.repository';
 import { MarketService } from './market.service';
 import { MarketEvents } from './market-events';
 import type { AdminActivityRepository } from './admin-activity.repository';
+import type { StellarService } from './stellar.service';
 import type { WatchedMarket } from './market.types';
 
 // Same "hand-rolled fakes, no real StellarService/network SDK" pattern as
@@ -322,5 +323,77 @@ describe('MarketFactoryService — auto-rolling successors', () => {
     expect(stellar.vaultWithdraw).toHaveBeenCalledTimes(1);
     const statuses = [r1.status, r2.status].sort();
     expect(statuses).toEqual(['created', 'skipped']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #163 — oracle hot-wallet balance monitoring
+
+describe('MarketFactoryService.run — oracle hot-wallet balance monitoring', () => {
+  function makeBalanceConfig(overrides: Record<string, unknown> = {}): ConfigService {
+    const values: Record<string, unknown> = {
+      feedCatalog: [],
+      nativeXlmSac: 'CNATIVE',
+      oracleMinBalanceStroops: '50000000',
+      ...overrides,
+    };
+    return { get: jest.fn((key: string) => values[key]) } as unknown as ConfigService;
+  }
+
+  function makeBalanceStellar(oracleBalance: bigint, deployerBalance: bigint): StellarService {
+    return {
+      oraclePublicKey: 'GORACLE',
+      deployerPublicKey: 'GDEPLOYER',
+      tokenBalance: jest.fn(async (_sac: string, address: string) => {
+        if (address === 'GORACLE') return oracleBalance;
+        if (address === 'GDEPLOYER') return deployerBalance;
+        return 0n;
+      }),
+    } as unknown as StellarService;
+  }
+
+  it('reads both wallet balances and fires when below the threshold', async () => {
+    const repo = makeRepo([]);
+    const markets = makeMarkets();
+    const stellar = makeBalanceStellar(1_000_000n, 100_000_000n); // oracle below threshold
+    const config = makeBalanceConfig();
+
+    const svc = new MarketFactoryService(repo, markets, stellar, config, new MarketEvents(), makeActivity());
+    // Access private method directly for a focused test without real network calls
+    await (svc as any).checkHotWalletBalances();
+
+    expect(stellar.tokenBalance).toHaveBeenCalledWith('CNATIVE', 'GORACLE');
+    expect(stellar.tokenBalance).toHaveBeenCalledWith('CNATIVE', 'GDEPLOYER');
+  });
+
+  it('calls tokenBalance for both wallets on each run() when nativeXlmSac is configured', async () => {
+    const repo = makeRepo([]);
+    const markets = makeMarkets();
+    const stellar = {
+      ...makeBalanceStellar(100_000_000n, 100_000_000n),
+      vaultWithdraw: jest.fn(),
+      deployMarket: jest.fn(),
+    } as unknown as StellarService;
+    const config = makeBalanceConfig({ feedCatalog: [] });
+    mockHermesFetch('empty');
+
+    const svc = new MarketFactoryService(repo, markets, stellar, config, new MarketEvents(), makeActivity());
+    await svc.run();
+
+    expect((stellar.tokenBalance as jest.Mock)).toHaveBeenCalledWith('CNATIVE', 'GORACLE');
+    expect((stellar.tokenBalance as jest.Mock)).toHaveBeenCalledWith('CNATIVE', 'GDEPLOYER');
+  });
+
+  it('skips balance check when nativeXlmSac is not configured', async () => {
+    const repo = makeRepo([]);
+    const markets = makeMarkets();
+    const stellar = makeBalanceStellar(0n, 0n);
+    const config = makeBalanceConfig({ nativeXlmSac: undefined });
+    mockHermesFetch('empty');
+
+    const svc = new MarketFactoryService(repo, markets, stellar, config, new MarketEvents(), makeActivity());
+    await (svc as any).checkHotWalletBalances();
+
+    expect(stellar.tokenBalance).not.toHaveBeenCalled();
   });
 });

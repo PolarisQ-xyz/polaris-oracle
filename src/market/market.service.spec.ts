@@ -592,6 +592,55 @@ describe('MarketService — oracle cross-check', () => {
     expect(svc.get(m.contractId)?.status).toBe('settled');
   });
 
+  it('emits the "finalized" event exactly once when a market settles', async () => {
+    const repo = makeRepo();
+    const stellar = { settle: jest.fn().mockResolvedValue('TXHASH1'), cancel: jest.fn() };
+    const oracle = {
+      isAvailable: true,
+      waitForUpdate: jest.fn().mockResolvedValue({ payload: Buffer.from('payload'), priceCents: undefined }),
+    };
+    const events = new MarketEvents();
+    const finalizedHandler = jest.fn();
+    events.on('finalized', finalizedHandler);
+    const svc = new MarketService(repo, stellar as any, oracle as any, {} as ConfigService, events, makeActivity());
+
+    const m = svc.watch(sample());
+    await flushMicrotasks();
+
+    expect(svc.get(m.contractId)?.status).toBe('settled');
+    expect(finalizedHandler).toHaveBeenCalledTimes(1);
+    expect(finalizedHandler).toHaveBeenCalledWith(expect.objectContaining({ contractId: 'CCONTRACT1' }));
+  });
+
+  it('emits the "finalized" event exactly once when a market is cancelled', async () => {
+    jest.useFakeTimers();
+    try {
+      const repo = makeRepo();
+      const stellar = {
+        settle: jest.fn(),
+        cancel: jest.fn().mockResolvedValue('CANCELTX'),
+        settleViaReflector: jest.fn().mockRejectedValue(new Error('not available')),
+        getMarketState: jest.fn().mockRejectedValue(new Error('rpc down')),
+      };
+      const oracle = { isAvailable: false, waitForUpdate: jest.fn() };
+      const events = new MarketEvents();
+      const finalizedHandler = jest.fn();
+      events.on('finalized', finalizedHandler);
+      const svc = new MarketService(repo, stellar as any, oracle as any, {} as ConfigService, events, makeActivity());
+
+      const m = sample({ gracePeriodSecs: 60 });
+      svc.watch(m);
+      await jest.advanceTimersByTimeAsync(3 * 750);
+      await jest.advanceTimersByTimeAsync(60_000 + 1000);
+
+      expect(svc.get(m.contractId)?.status).toBe('cancelled');
+      expect(finalizedHandler).toHaveBeenCalledTimes(1);
+      expect(finalizedHandler).toHaveBeenCalledWith(expect.objectContaining({ contractId: 'CCONTRACT1' }));
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('skips the cross-check when Lazer sent no parsed price for this feed', async () => {
     const repo = makeRepo();
     const stellar = { settle: jest.fn().mockResolvedValue('TXHASH1'), cancel: jest.fn() };
