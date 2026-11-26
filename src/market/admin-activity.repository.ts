@@ -116,30 +116,10 @@ export class AdminActivityRepository {
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_settlement_checks_created_at ON settlement_checks(created_at);
-
-      CREATE TABLE IF NOT EXISTS settlement_attempts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        market_contract_id TEXT NOT NULL,
-        path TEXT NOT NULL,
-        attempt INTEGER NOT NULL,
-        outcome TEXT NOT NULL,
-        error TEXT,
-        tx_hash TEXT,
-        created_at INTEGER NOT NULL
+      CREATE TABLE IF NOT EXISTS kv_flags (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS idx_settlement_attempts_market ON settlement_attempts(market_contract_id);
-      CREATE INDEX IF NOT EXISTS idx_settlement_attempts_created_at ON settlement_attempts(created_at);
-
-      CREATE TABLE IF NOT EXISTS admin_actions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        action TEXT NOT NULL,
-        target_contract_id TEXT,
-        params_json TEXT,
-        result TEXT,
-        ip TEXT,
-        created_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_admin_actions_created_at ON admin_actions(created_at);
     `);
   }
 
@@ -248,52 +228,15 @@ export class AdminActivityRepository {
     return counts;
   }
 
-  recordSettlementAttempt(attempt: {
-    marketContractId: string;
-    path: 'lazer' | 'reflector' | 'cancel' | 'reconcile';
-    attempt: number;
-    outcome: 'success' | 'failure';
-    error?: string;
-    txHash?: string;
-  }): void {
-    this.db
-      .prepare(
-        `INSERT INTO settlement_attempts (market_contract_id, path, attempt, outcome, error, tx_hash, created_at)
-         VALUES (@marketContractId, @path, @attempt, @outcome, @error, @txHash, @createdAt)`,
-      )
-      .run({ ...attempt, error: attempt.error ?? null, txHash: attempt.txHash ?? null, createdAt: Date.now() });
+  /** Persist a named flag (issue #179 — factory pause state). */
+  setFlag(key: string, value: string): void {
+    this.db.prepare(`INSERT INTO kv_flags (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, value);
   }
 
-  getSettlementAttemptsByMarket(marketContractId: string): SettlementAttemptRow[] {
-    return this.db
-      .prepare(`SELECT * FROM settlement_attempts WHERE market_contract_id = ? ORDER BY created_at ASC`)
-      .all(marketContractId) as SettlementAttemptRow[];
-  }
-
-  recordAdminAction(action: {
-    action: string;
-    targetContractId?: string;
-    paramsJson?: string;
-    result?: string;
-    ip?: string;
-  }): void {
-    this.db
-      .prepare(
-        `INSERT INTO admin_actions (action, target_contract_id, params_json, result, ip, created_at)
-         VALUES (@action, @targetContractId, @paramsJson, @result, @ip, @createdAt)`,
-      )
-      .run({
-        action: action.action,
-        targetContractId: action.targetContractId ?? null,
-        paramsJson: action.paramsJson ?? null,
-        result: action.result ?? null,
-        ip: action.ip ?? null,
-        createdAt: Date.now(),
-      });
-  }
-
-  getRecentAdminActions(limit: number): AdminActionRow[] {
-    return this.db.prepare(`SELECT * FROM admin_actions ORDER BY created_at DESC LIMIT ?`).all(limit) as AdminActionRow[];
+  /** Read a named flag; returns null when unset. */
+  getFlag(key: string): string | null {
+    const row = this.db.prepare(`SELECT value FROM kv_flags WHERE key = ?`).get(key) as { value: string } | undefined;
+    return row?.value ?? null;
   }
 
   onModuleDestroy(): void {
