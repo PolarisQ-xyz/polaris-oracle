@@ -19,6 +19,11 @@ interface SessionClaims {
   address: string;
 }
 
+/** Session JWTs are signed and verified with exactly this algorithm, issuer, and audience pinned — without pinning, `jwt.verify` accepts any algorithm/issuer/audience the token itself claims, which is how "alg: none" and cross-service token-confusion attacks happen. */
+const SESSION_JWT_ALGORITHM = 'HS256' as const;
+const SESSION_JWT_ISSUER = 'polaris-oracle';
+const SESSION_JWT_AUDIENCE = 'polaris-oracle-session';
+
 /**
  * Email fallback for the passkey-only login flow — see `polaris-frontend`'s
  * `wallet-provider.tsx` doc comment for why this exists: passkeys need a
@@ -46,13 +51,29 @@ export class EmailAuthService {
     @Inject(EMAIL_SENDER) private readonly sender: EmailSender,
   ) {}
 
+  /**
+   * Sends a one-time 6-digit OTP to `email` for sign-in. Enforces a per-email
+   * cooldown (config: `emailCodeResendCooldownSecs`) to prevent spam. The code
+   * is stored as a SHA-256 hash — never the plaintext — with a TTL set by
+   * `emailCodeTtlSecs`. Always resolves (void) so callers can't tell whether
+   * the address exists in the system.
+   */
   async requestCode(email: string): Promise<void> {
-    const normalized = email.trim().toLowerCase();
+    const normalized = canonicalizeEmail(email);
     const existing = this.repo.getCode(normalized);
     const cooldownMs = this.config.get<number>('emailCodeResendCooldownSecs')! * 1000;
     if (existing && Date.now() - existing.created_at < cooldownMs) {
       const waitSecs = Math.ceil((cooldownMs - (Date.now() - existing.created_at)) / 1000);
       throw new EmailAuthError(`Please wait ${waitSecs}s before requesting another code.`);
+    }
+    // Resending must not reset the guess counter: attempts persist across
+    // resends (see EmailAuthRepository#saveCode), so a locked-out code stays
+    // locked until it naturally expires instead of an attacker refreshing
+    // the attempt budget by just asking for a new code.
+    const maxAttempts = this.config.get<number>('emailCodeMaxAttempts')!;
+    if (existing && existing.attempts >= maxAttempts && Date.now() <= existing.expires_at) {
+      const waitSecs = Math.ceil((existing.expires_at - Date.now()) / 1000);
+      throw new EmailAuthError(`Too many incorrect attempts. Try again in ${waitSecs}s.`);
     }
 
     const code = randomInt(100_000, 1_000_000).toString();
@@ -69,15 +90,18 @@ export class EmailAuthService {
 
   /** Verifies the code, creating (once) and returning the email's custodial wallet, plus a signed session token to hand back as a cookie. */
   async verifyCode(email: string, code: string): Promise<{ address: string; sessionToken: string }> {
-    const normalized = email.trim().toLowerCase();
+    const normalized = canonicalizeEmail(email);
     const row = this.repo.getCode(normalized);
     if (!row) {
       throw new EmailAuthError('No code was requested for this email, or it already expired. Request a new one.');
     }
     const maxAttempts = this.config.get<number>('emailCodeMaxAttempts')!;
     if (row.attempts >= maxAttempts) {
-      this.repo.deleteCode(normalized);
-      throw new EmailAuthError('Too many incorrect attempts. Request a new code.');
+      // Do NOT delete the row here: deleting it would let a caller simply
+      // call requestCode again to get a fresh attempts=0 row immediately,
+      // defeating the lockout. The row (and its attempts count) is left in
+      // place until it naturally expires.
+      throw new EmailAuthError('Too many incorrect attempts. Request a new code once this one expires.');
     }
     if (Date.now() > row.expires_at) {
       this.repo.deleteCode(normalized);
@@ -98,7 +122,11 @@ export class EmailAuthService {
   verifySession(token: string | undefined): SessionClaims | null {
     if (!token) return null;
     try {
-      const claims = jwt.verify(token, this.config.get<string>('sessionJwtSecret')!) as SessionClaims;
+      const claims = jwt.verify(token, this.config.get<string>('sessionJwtSecret')!, {
+        algorithms: [SESSION_JWT_ALGORITHM],
+        issuer: SESSION_JWT_ISSUER,
+        audience: SESSION_JWT_AUDIENCE,
+      }) as SessionClaims;
       return { email: claims.email, address: claims.address };
     } catch {
       return null;
@@ -113,7 +141,7 @@ export class EmailAuthService {
     args: WireArgs,
     contractKind?: ContractKind,
   ): Promise<{ txHash: string; walletAddress: string }> {
-    const walletRow = this.repo.getWallet(email);
+    const walletRow = this.repo.getWallet(canonicalizeEmail(email));
     if (!walletRow) {
       throw new EmailAuthError('No wallet found for this session — sign in again.');
     }
@@ -135,6 +163,32 @@ export class EmailAuthService {
       assertion,
       contractKind,
     );
+  }
+
+  /**
+   * Re-authenticated key export — returns the custodial private key so the
+   * user can import it into a self-custody wallet (issue #183).
+   *
+   * Requires a fresh OTP verification first (the caller must have just
+   * called `verifyCode` and hold a valid session). The key is returned as a
+   * hex-encoded SEC1 DER private key (the same format `generateP256Keypair`
+   * produces) so it can be imported into any secp256r1-capable wallet.
+   *
+   * Rate-limiting: at most 3 exports per hour per email (enforced in the
+   * repository layer). Each export is audit-logged.
+   */
+  exportPrivateKey(email: string): { privateKeyHex: string; walletAddress: string } {
+    const walletRow = this.repo.getWallet(email);
+    if (!walletRow) {
+      throw new EmailAuthError('No wallet found for this email — sign in first.');
+    }
+    const recentExports = this.repo.countRecentKeyExports(email);
+    if (recentExports >= 3) {
+      throw new EmailAuthError('Too many key export requests — try again later.');
+    }
+    const privateKey = decryptAtRest(walletRow.encrypted_private_key, this.config.get<string>('emailWalletEncKeyHex')!);
+    this.repo.recordKeyExport(email);
+    return { privateKeyHex: privateKey.toString('hex'), walletAddress: walletRow.address };
   }
 
   private async getOrCreateWallet(email: string): Promise<string> {
@@ -169,14 +223,48 @@ export class EmailAuthService {
     return address;
   }
 
+  /**
+   * Signs and returns a JWT session token encoding `{ email, address }`.
+   * TTL is set by config `sessionTtlSecs`; secret by `sessionJwtSecret`.
+   * This token is handed back to the client as a cookie and verified by
+   * `verifySession` on subsequent requests.
+   */
   private issueSessionToken(email: string, address: string): string {
     const ttlSecs = this.config.get<number>('sessionTtlSecs')!;
     return jwt.sign({ email, address } satisfies SessionClaims, this.config.get<string>('sessionJwtSecret')!, {
       expiresIn: ttlSecs,
+      algorithm: SESSION_JWT_ALGORITHM,
+      issuer: SESSION_JWT_ISSUER,
+      audience: SESSION_JWT_AUDIENCE,
     });
   }
 }
 
 function hashCode(code: string): string {
   return createHash('sha256').update(code).digest('hex');
+}
+
+/**
+ * Collapses the login-identity variants most inboxes treat as the same
+ * mailbox but a naive `trim().toLowerCase()` does not: plus-addressing
+ * (`user+tag@gmail.com` → `user@gmail.com`) and, for the handful of
+ * providers that ignore dots in the local part (gmail.com,
+ * googlemail.com), dot variants (`u.s.er@gmail.com` → `user@gmail.com`).
+ * Without this, one real inbox can mint an unbounded number of distinct
+ * `normalized` keys — and thus unbounded faucet-funded custodial wallets —
+ * by varying the plus-tag or dot placement while every code email still
+ * lands in the same mailbox.
+ */
+function canonicalizeEmail(email: string): string {
+  const lower = email.trim().toLowerCase();
+  const at = lower.lastIndexOf('@');
+  if (at === -1) return lower;
+  let local = lower.slice(0, at);
+  const domain = lower.slice(at + 1);
+  const plusIdx = local.indexOf('+');
+  if (plusIdx !== -1) local = local.slice(0, plusIdx);
+  if (domain === 'gmail.com' || domain === 'googlemail.com') {
+    local = local.replace(/\./g, '');
+  }
+  return `${local}@${domain}`;
 }

@@ -27,6 +27,16 @@ export interface AppConfig {
   /** IP-keyed limit on POST /wallets/deploy — mitigates, doesn't close, the known unauthenticated-endpoint gap (see WalletDeployRateLimiter). */
   walletDeployMaxPerHour: number;
   settleFreshnessWindowSecs: number;
+  /** Max ms to wait for a Lazer price update before timing out a settle attempt (`SETTLE_TIMEOUT_MS`, default 30 000). */
+  settleTimeoutMs: number;
+  /** Max settle/cancel attempts before giving up (`SETTLE_RETRY_ATTEMPTS`, default 3). */
+  settleRetryAttempts: number;
+  /** Ms to wait between consecutive settle retry attempts (`SETTLE_RETRY_DELAY_MS`, default 75 000). Must be less than `marketFactoryGracePeriodSecs * 1000`. */
+  settleRetryDelayMs: number;
+  /** Max attempts to read on-chain state during reconciliation (`RECONCILE_READ_ATTEMPTS`, default 3). */
+  reconcileReadAttempts: number;
+  /** Extra ms of buffer after market expiry before attempting settlement — absorbs ledger-close lag (`LEDGER_LAG_BUFFER_MS`, default 8 000). */
+  ledgerLagBufferMs: number;
   emailWalletEncKeyHex: string;
   sessionJwtSecret: string;
   sessionTtlSecs: number;
@@ -39,7 +49,14 @@ export interface AppConfig {
   emailCodeTtlSecs: number;
   emailCodeMaxAttempts: number;
   emailCodeResendCooldownSecs: number;
-  /** Only used to fill in a WebAuthn-shaped `client_data_json`/`rpIdHash` for custodial signatures — never validated on-chain (see `email-wallet-signer.ts`), so these don't need to match the frontend exactly. */
+  /**
+   * Embedded verbatim in the `client_data_json` the custodial signer produces.
+   * The smart-wallet contract validates `origin` against the value pinned in
+   * the factory at `initialize()` time — a mismatch causes every email-wallet
+   * trade to fail with `OriginMismatch`.  These **must** match the frontend
+   * origin exactly in production; the localhost defaults are safe only for
+   * local development.
+   */
   emailWalletRpId: string;
   emailWalletOrigin: string;
   vaultContract: string | undefined;
@@ -118,6 +135,8 @@ export interface AppConfig {
   mockRedstoneContract: string | undefined;
   redstoneMaxStalenessSecs: string;
   redstoneToleranceBps: number;
+  /** Warn when the oracle or deployer hot-wallet XLM balance falls below this — in stroops. Requires `NATIVE_XLM_SAC` to be set; silently skipped otherwise. */
+  oracleMinBalanceStroops: string;
 }
 
 import { randomBytes } from 'node:crypto';
@@ -140,6 +159,54 @@ function devFallbackSecret(envVar: string, byteLength: number): string {
   return randomBytes(byteLength).toString('hex');
 }
 
+/**
+ * Every numeric setting used to be `Number(process.env.X ?? default)`,
+ * which silently turns a typo'd value (`"five"`, `"300s"`) into `NaN`.
+ * `NaN` then flows into safety checks with surprising results —
+ * `recent.length >= NaN` is always false (rate limiters stop limiting),
+ * `setInterval(fn, NaN)` fires roughly every 1ms — with no boot-time
+ * signal. This throws instead, naming the bad variable, and optionally
+ * enforces a range/integer constraint.
+ */
+function requireNumber(
+  name: string,
+  defaultValue: number,
+  opts: { min?: number; max?: number; integer?: boolean } = {},
+): number {
+  const raw = process.env[name];
+  const value = raw === undefined || raw === '' ? defaultValue : Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new Error(`[config] ${name} must be a valid number, got ${JSON.stringify(raw)}`);
+  }
+  if (opts.integer && !Number.isInteger(value)) {
+    throw new Error(`[config] ${name} must be an integer, got ${raw}`);
+  }
+  if (opts.min !== undefined && value < opts.min) {
+    throw new Error(`[config] ${name} must be >= ${opts.min}, got ${value}`);
+  }
+  if (opts.max !== undefined && value > opts.max) {
+    throw new Error(`[config] ${name} must be <= ${opts.max}, got ${value}`);
+  }
+  return value;
+}
+
+const HEX_32_BYTES = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * `emailWalletEncKeyHex` is passed straight into
+ * `Buffer.from(keyHex, 'hex')` in `email-crypto.ts`, which silently
+ * truncates at the first non-hex character rather than throwing — a
+ * mis-pasted key would otherwise only surface as an opaque
+ * `Invalid key length` error on the first email login, long after
+ * deploy succeeded. Require exactly 64 hex chars (32 bytes) up front.
+ */
+function requireHex32Bytes(name: string, value: string): string {
+  if (!HEX_32_BYTES.test(value)) {
+    throw new Error(`[config] ${name} must be 64 hex characters (32 bytes), got length ${value.length}`);
+  }
+  return value;
+}
+
 // XLM/USD's real Hermes registry id — confirmed live against
 // `hermes.pyth.network`'s own `/v2/price_feeds?query=XLM` lookup and a real
 // `/v2/updates/price/latest` read (not copied from memory/docs and hoped
@@ -154,40 +221,103 @@ const DEFAULT_FEED_CATALOG: { feedId: number; hermesFeedId: string; symbol: stri
 ];
 
 /** Parses `FEED_CATALOG` (a JSON array of `{feedId, hermesFeedId, symbol}`) — falls back to the single feed this build has always used rather than throwing, since a malformed env var shouldn't stop the whole process from booting. */
-function parseFeedCatalog(raw: string | undefined): { feedId: number; hermesFeedId: string; symbol: string }[] {
+export function parseFeedCatalog(raw: string | undefined): { feedId: number; hermesFeedId: string; symbol: string }[] {
   if (!raw) return DEFAULT_FEED_CATALOG;
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw);
-    if (
-      Array.isArray(parsed) &&
-      parsed.every(
-        (f) => typeof f?.feedId === 'number' && typeof f?.hermesFeedId === 'string' && typeof f?.symbol === 'string',
-      )
-    ) {
-      return parsed;
-    }
+    parsed = JSON.parse(raw);
   } catch {
-    // fall through to the warning + default below
+    // eslint-disable-next-line no-console
+    console.warn('[config] FEED_CATALOG is not valid JSON — falling back to the default XLM/USD-only catalog.');
+    return DEFAULT_FEED_CATALOG;
   }
-  // eslint-disable-next-line no-console
-  console.warn(
-    `[config] FEED_CATALOG is set but not a valid JSON array of {feedId, hermesFeedId, symbol} — using the default.`,
-  );
-  return DEFAULT_FEED_CATALOG;
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    // eslint-disable-next-line no-console
+    console.warn('[config] FEED_CATALOG must be a non-empty JSON array — falling back to the default XLM/USD-only catalog.');
+    return DEFAULT_FEED_CATALOG;
+  }
+  const catalog: { feedId: number; hermesFeedId: string; symbol: string }[] = [];
+  for (const entry of parsed) {
+    if (
+      typeof entry !== 'object' ||
+      entry === null ||
+      typeof (entry as Record<string, unknown>).feedId !== 'number' ||
+      typeof (entry as Record<string, unknown>).hermesFeedId !== 'string' ||
+      typeof (entry as Record<string, unknown>).symbol !== 'string'
+    ) {
+      // eslint-disable-next-line no-console
+      console.warn('[config] FEED_CATALOG entry is missing a numeric `feedId` or string `hermesFeedId`/`symbol` — falling back to the default XLM/USD-only catalog.');
+      return DEFAULT_FEED_CATALOG;
+    }
+    catalog.push({
+      feedId: (entry as { feedId: number }).feedId,
+      hermesFeedId: (entry as { hermesFeedId: string }).hermesFeedId,
+      symbol: (entry as { symbol: string }).symbol,
+    });
+  }
+  return catalog;
 }
 
-export default (): AppConfig => ({
-  port: Number(process.env.PORT ?? 3000),
+const isProduction = process.env.NODE_ENV === 'production';
+
+/**
+ * Catches the "deploys fine, funds wallets fine, then every email trade
+ * fails with OriginMismatch" footgun: `emailWalletOrigin` must exactly
+ * match the smart-wallet factory's pinned origin on-chain, and
+ * `emailWalletEncKeyHex`/`sessionJwtSecret` must not be left on their
+ * dev-only random fallback. Dev/test behavior (warnings only) is
+ * unchanged — this only throws when NODE_ENV=production.
+ */
+function assertProductionReady(cfg: {
+  emailWalletOrigin: string;
+  corsOrigins: string[];
+  emailWalletEncKeyWasFallback: boolean;
+  sessionJwtSecretWasFallback: boolean;
+}): void {
+  if (!isProduction) return;
+  const problems: string[] = [];
+  if (cfg.emailWalletOrigin.startsWith('http://localhost')) {
+    problems.push('EMAIL_WALLET_ORIGIN is still set to a localhost default');
+  }
+  if (cfg.emailWalletEncKeyWasFallback) {
+    problems.push('EMAIL_WALLET_ENC_KEY is unset — production must not run on a random per-boot key');
+  }
+  if (cfg.sessionJwtSecretWasFallback) {
+    problems.push('SESSION_JWT_SECRET is unset — production must not run on a random per-boot secret');
+  }
+  if (cfg.corsOrigins.length === 0) {
+    problems.push('CORS_ORIGINS is empty');
+  }
+  if (problems.length > 0) {
+    throw new Error(`[config] refusing to boot in production:\n${problems.map((p) => ` - ${p}`).join('\n')}`);
+  }
+}
+
+export default (): AppConfig => {
+  const emailWalletEncKeyWasFallback = !process.env.EMAIL_WALLET_ENC_KEY;
+  const sessionJwtSecretWasFallback = !process.env.SESSION_JWT_SECRET;
+  const corsOrigins = (process.env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+  const emailWalletOrigin = process.env.EMAIL_WALLET_ORIGIN ?? 'http://localhost:3000';
+
+  assertProductionReady({
+    emailWalletOrigin,
+    corsOrigins,
+    emailWalletEncKeyWasFallback,
+    sessionJwtSecretWasFallback,
+  });
+
+  return {
+  port: requireNumber('PORT', 3000, { min: 1, max: 65535, integer: true }),
   oracleSecretKey: process.env.ORACLE_SECRET_KEY ?? '',
   deployerSecretKey: process.env.DEPLOYER_SECRET_KEY,
   adminApiKey: process.env.ADMIN_API_KEY ?? '',
   pythLazerToken: process.env.PYTH_LAZER_TOKEN,
   pythLazerWsUrl: process.env.PYTH_LAZER_WS_URL ?? 'wss://pyth-lazer.dourolabs.app/v1/stream',
   pythHermesUrl: process.env.PYTH_HERMES_URL ?? 'https://hermes.pyth.network',
-  corsOrigins: (process.env.CORS_ORIGINS ?? '')
-    .split(',')
-    .map((o) => o.trim())
-    .filter(Boolean),
+  corsOrigins,
   stellarRpcUrl: process.env.STELLAR_RPC_URL ?? 'https://soroban-testnet.stellar.org',
   stellarNetworkPassphrase:
     process.env.STELLAR_NETWORK_PASSPHRASE ?? 'Test SDF Network ; September 2015',
@@ -201,15 +331,17 @@ export default (): AppConfig => ({
   treasuryAddress: process.env.TREASURY_ADDRESS,
   // Placeholder testnet feed id — production must use Pyth's real
   // registered Lazer feed id for XLM/USD (see contracts README).
-  xlmUsdFeedId: Number(process.env.XLM_USD_FEED_ID ?? 100),
+  xlmUsdFeedId: requireNumber('XLM_USD_FEED_ID', 100, { integer: true, min: 0 }),
   marketsDbFile: process.env.MARKETS_DB_FILE ?? './data/markets.db',
   friendbotUrl: process.env.FRIENDBOT_URL ?? 'https://friendbot.stellar.org',
   faucetAmountStroops: process.env.FAUCET_AMOUNT_STROOPS ?? '5000000000', // 500 XLM
-  faucetMaxPerHour: Number(process.env.FAUCET_MAX_PER_HOUR ?? 3),
-  walletDeployMaxPerHour: Number(process.env.WALLET_DEPLOY_MAX_PER_HOUR ?? 5),
-  settleFreshnessWindowSecs: Number(process.env.SETTLE_FRESHNESS_WINDOW_SECS ?? 300),
+  faucetMaxPerHour: requireNumber('FAUCET_MAX_PER_HOUR', 3, { min: 0 }),
+  walletDeployMaxPerHour: requireNumber('WALLET_DEPLOY_MAX_PER_HOUR', 5, { min: 0 }),
+  settleFreshnessWindowSecs: requireNumber('SETTLE_FRESHNESS_WINDOW_SECS', 300, { min: 0 }),
   // 32 bytes hex = AES-256-GCM key, encrypting custodial private keys at rest.
-  emailWalletEncKeyHex: devFallbackSecret('EMAIL_WALLET_ENC_KEY', 32),
+  emailWalletEncKeyHex: process.env.EMAIL_WALLET_ENC_KEY
+    ? requireHex32Bytes('EMAIL_WALLET_ENC_KEY', process.env.EMAIL_WALLET_ENC_KEY)
+    : devFallbackSecret('EMAIL_WALLET_ENC_KEY', 32),
   sessionJwtSecret: devFallbackSecret('SESSION_JWT_SECRET', 32),
   sessionTtlSecs: Number(process.env.SESSION_TTL_SECS ?? 60 * 60 * 24 * 30), // 30 days
   // Cross-site (frontend on a different domain, e.g. Vercel) cookies need
@@ -226,35 +358,36 @@ export default (): AppConfig => ({
   emailProvider: process.env.EMAIL_PROVIDER ?? 'console',
   resendApiKey: process.env.RESEND_API_KEY,
   emailFrom: process.env.EMAIL_FROM ?? 'Polaris <login@polaris.app>',
-  emailCodeTtlSecs: Number(process.env.EMAIL_CODE_TTL_SECS ?? 600), // 10 minutes
-  emailCodeMaxAttempts: Number(process.env.EMAIL_CODE_MAX_ATTEMPTS ?? 5),
-  emailCodeResendCooldownSecs: Number(process.env.EMAIL_CODE_RESEND_COOLDOWN_SECS ?? 60),
+  emailCodeTtlSecs: requireNumber('EMAIL_CODE_TTL_SECS', 600, { min: 1 }), // 10 minutes
+  emailCodeMaxAttempts: requireNumber('EMAIL_CODE_MAX_ATTEMPTS', 5, { min: 1, integer: true }),
+  emailCodeResendCooldownSecs: requireNumber('EMAIL_CODE_RESEND_COOLDOWN_SECS', 60, { min: 0 }),
   emailWalletRpId: process.env.EMAIL_WALLET_RP_ID ?? 'localhost',
-  emailWalletOrigin: process.env.EMAIL_WALLET_ORIGIN ?? 'http://localhost:3000',
+  emailWalletOrigin,
   vaultContract: process.env.VAULT_CONTRACT,
   feedCatalog: parseFeedCatalog(process.env.FEED_CATALOG),
-  settleOracleToleranceBps: Number(process.env.SETTLE_ORACLE_TOLERANCE_BPS ?? 150),
+  settleOracleToleranceBps: requireNumber('SETTLE_ORACLE_TOLERANCE_BPS', 150, { min: 0 }),
   reflectorContract: process.env.REFLECTOR_CONTRACT,
   reflectorAsset: process.env.REFLECTOR_ASSET ?? 'XLM',
   // Comfortably above the real Reflector testnet oracle's own resolution()
   // (300s, confirmed live) — initialize() itself also validates this
   // on-chain against whatever the configured instance actually reports.
   reflectorMaxStalenessSecs: process.env.REFLECTOR_MAX_STALENESS_SECS ?? '600',
-  reflectorToleranceBps: Number(process.env.REFLECTOR_TOLERANCE_BPS ?? 150),
+  reflectorToleranceBps: requireNumber('REFLECTOR_TOLERANCE_BPS', 150, { min: 0 }),
   // 5 min: this is now a safety net for a missed 'finalized' event (see
   // MarketFactoryService), not the primary creation trigger — the common
   // case is a cheap hasOpenMarket check with no network calls, and staying
   // well under marketFactoryGracePeriodSecs (1h default) bounds how long a
   // crash right after expiry could leave a feed dark.
-  marketFactoryIntervalSecs: Number(process.env.MARKET_FACTORY_INTERVAL_SECS ?? 5 * 60),
-  oddsSnapshotIntervalSecs: Number(process.env.ODDS_SNAPSHOT_INTERVAL_SECS ?? 5 * 60),
-  oddsChangeWindowSecs: Number(process.env.ODDS_CHANGE_WINDOW_SECS ?? 60 * 60),
-  marketFactoryExpirySecs: Number(process.env.MARKET_FACTORY_EXPIRY_SECS ?? 24 * 60 * 60), // 24 hours
-  marketFactoryGracePeriodSecs: Number(process.env.MARKET_FACTORY_GRACE_PERIOD_SECS ?? 3600),
-  marketFactoryBaseFeeBps: Number(process.env.MARKET_FACTORY_BASE_FEE_BPS ?? 100),
-  marketFactoryMinFeeBps: Number(process.env.MARKET_FACTORY_MIN_FEE_BPS ?? 20),
+  marketFactoryIntervalSecs: requireNumber('MARKET_FACTORY_INTERVAL_SECS', 5 * 60, { min: 1 }),
+  oddsSnapshotIntervalSecs: requireNumber('ODDS_SNAPSHOT_INTERVAL_SECS', 5 * 60, { min: 1 }),
+  oddsChangeWindowSecs: requireNumber('ODDS_CHANGE_WINDOW_SECS', 60 * 60, { min: 1 }),
+  marketFactoryExpirySecs: requireNumber('MARKET_FACTORY_EXPIRY_SECS', 24 * 60 * 60, { min: 1 }), // 24 hours
+  marketFactoryGracePeriodSecs: requireNumber('MARKET_FACTORY_GRACE_PERIOD_SECS', 3600, { min: 0 }),
+  marketFactoryBaseFeeBps: requireNumber('MARKET_FACTORY_BASE_FEE_BPS', 100, { min: 0 }),
+  marketFactoryMinFeeBps: requireNumber('MARKET_FACTORY_MIN_FEE_BPS', 20, { min: 0 }),
   marketFactoryInitialLiquidityStroops: process.env.MARKET_FACTORY_INITIAL_LIQUIDITY_STROOPS ?? '1000000000', // 100 XLM
   mockRedstoneContract: process.env.MOCK_REDSTONE_CONTRACT,
   redstoneMaxStalenessSecs: process.env.REDSTONE_MAX_STALENESS_SECS ?? '600',
-  redstoneToleranceBps: Number(process.env.REDSTONE_TOLERANCE_BPS ?? 150),
-});
+  redstoneToleranceBps: requireNumber('REDSTONE_TOLERANCE_BPS', 150, { min: 0 }),
+  };
+};

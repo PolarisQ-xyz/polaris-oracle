@@ -4,10 +4,12 @@ import { IsInt, IsNumberString, Min } from 'class-validator';
 export class CreatePerpetualDto {
   @IsInt()
   @Min(0)
+  @Max(1000)
   baseFeeBps!: number;
 
   @IsInt()
   @Min(0)
+  @Max(1000)
   minFeeBps!: number;
 
   @IsNumberString()
