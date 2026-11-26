@@ -866,8 +866,12 @@ export class StellarService {
   /**
    * Same deploy-then-initialize CLI shell-out as `deployMarket`, for
    * `polaris-perpetual` — no strike/expiry/grace_period/feed_id (none
-   * exist on this contract). `price_oracle` is `None` unless
-   * `params.priceOracle` is supplied (see `buildPriceOracleArg`).
+   * exist on this contract). `price_oracle` is set from `params.priceOracle`
+   * when provided (a Lazer+Reflector[+RedStone] bundle — see
+   * `polaris-contracts/README.md`'s "A third oracle: RedStone"); it defaults
+   * to `null` (i.e. `price_oracle: None`) when omitted, as before this was
+   * wired. `record_price_checkpoint` is consequently not exposed anywhere in
+   * this backend either — see `PerpetualController`.
    */
   async deployPerpetual(params: CreatePerpetualParams): Promise<{ contractId: string; initTxHash: string }> {
     return this.deployAndInitialize(
@@ -971,18 +975,7 @@ export class StellarService {
     }
   }
 
-  /**
-   * Returns true when a CLI error message indicates AlreadyInitialized (#2 in
-   * every Polaris contract's Error enum). Extracted to keep the two reconcile
-   * catch blocks (deployMarket / deployPerpetual) consistent and independently
-   * testable.
-   */
-  static isAlreadyInitializedError(err: unknown): boolean {
-    const message = (err as { stderr?: string; message: string }).stderr ?? (err as Error).message;
-    return /Error\(Contract, #2\)/.test(message);
-  }
-
-  /** Runs a `stellar` CLI call, retrying past the transient failures in `TRANSIENT_CLI_ERROR`. Anything else fails immediately — retrying a genuine error (bad params, insufficient balance) would just waste time before failing anyway. */
+  /** Runs a `stellar` CLI call, retrying past the transient failures identified by `isTransientStellarCliError`. Permanent errors (classified by `PERMANENT_CONTRACT_ERROR`) fail immediately — retrying a genuine error (bad params, insufficient balance) would just waste time before failing anyway. */
   private async execStellarCli(
     args: string[],
     attempts = CLI_RETRY_ATTEMPTS,

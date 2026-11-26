@@ -60,11 +60,9 @@ export interface WebAuthnAssertion {
  *    the start (rather than mutating a parsed transaction's internals,
  *    which the SDK does not document as safe), and submits.
  *
- * Caveat: this is structurally complete and follows the SDK's documented
- * `authorizeEntry`/custom-account pattern, but has not been exercised
- * against a live Soroban RPC endpoint in this build environment — there is
- * no network access here to do so. Treat it as unverified until run against
- * testnet.
+ * Verified: passkey and email-wallet trades have been exercised end-to-end
+ * on testnet. Mainnet operation remains untested; treat mainnet as
+ * unverified until a live mainnet trade confirms the relay path.
  */
 @Injectable()
 export class AuthRelayService {

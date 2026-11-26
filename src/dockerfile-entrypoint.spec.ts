@@ -31,4 +31,23 @@ describe('Dockerfile CMD matches the real build output', () => {
     const entrypoint = join(repoRoot, `${match[1]}.js`);
     expect(existsSync(entrypoint)).toBe(true);
   }, 30000);
+
+  it('start:prod script points at the same file as the Dockerfile CMD', () => {
+    const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as {
+      scripts?: Record<string, string>;
+    };
+    const startProd = pkg.scripts?.['start:prod'];
+    if (!startProd) throw new Error('package.json has no "start:prod" script');
+
+    // Extract the path argument from `node <path>`.
+    const scriptMatch = startProd.match(/^node\s+(\S+)/);
+    if (!scriptMatch) throw new Error(`start:prod does not start with "node <path>": ${startProd}`);
+    const scriptPath = scriptMatch[1];
+
+    const dockerfile = readFileSync(join(repoRoot, 'Dockerfile'), 'utf8');
+    const dockerMatch = dockerfile.match(/^CMD \["node", "([^"]+)"\]/m);
+    if (!dockerMatch) throw new Error('Dockerfile has no `CMD ["node", "..."]` entrypoint to check');
+
+    expect(scriptPath).toBe(dockerMatch[1]);
+  });
 });
