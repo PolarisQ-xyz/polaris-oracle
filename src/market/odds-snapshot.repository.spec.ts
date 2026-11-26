@@ -1,13 +1,9 @@
-import { ConfigService } from '@nestjs/config';
+import { openDatabase } from './database.provider';
 import { OddsSnapshotRepository } from './odds-snapshot.repository';
-
-function makeConfig() {
-  return { get: () => './data/markets.db' } as unknown as ConfigService;
-}
 
 describe('OddsSnapshotRepository', () => {
   it('closestBefore returns the most recent snapshot at or before the requested time', () => {
-    const repo = new OddsSnapshotRepository(':memory:', makeConfig());
+    const repo = new OddsSnapshotRepository(openDatabase(':memory:'));
     repo.record('C1', 5000, 5000, 1000);
     repo.record('C1', 6000, 4000, 2000);
     repo.record('C1', 7000, 3000, 3000);
@@ -18,14 +14,14 @@ describe('OddsSnapshotRepository', () => {
   });
 
   it('returns undefined when no snapshot exists that far back yet', () => {
-    const repo = new OddsSnapshotRepository(':memory:', makeConfig());
+    const repo = new OddsSnapshotRepository(openDatabase(':memory:'));
     repo.record('C1', 5000, 5000, 5000);
 
     expect(repo.closestBefore('C1', 1000)).toBeUndefined();
   });
 
   it('keeps different markets independent', () => {
-    const repo = new OddsSnapshotRepository(':memory:', makeConfig());
+    const repo = new OddsSnapshotRepository(openDatabase(':memory:'));
     repo.record('C1', 5000, 5000, 1000);
     repo.record('C2', 9000, 1000, 1000);
 
@@ -34,7 +30,7 @@ describe('OddsSnapshotRepository', () => {
   });
 
   it('pruneOlderThan deletes only snapshots before the cutoff', () => {
-    const repo = new OddsSnapshotRepository(':memory:', makeConfig());
+    const repo = new OddsSnapshotRepository(openDatabase(':memory:'));
     repo.record('C1', 1000, 9000, 1000);
     repo.record('C1', 2000, 8000, 5000);
 

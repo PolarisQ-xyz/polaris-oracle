@@ -51,6 +51,32 @@ describe('signChallengeWithEmailWallet', () => {
     expect(clientData.type).toBe('webauthn.get');
   });
 
+  it('authenticatorData layout: 32-byte rpIdHash ‖ flags(0x05) ‖ signCount(0x00000000)', () => {
+    // The contract unpacks authenticatorData at known byte offsets — this
+    // locks the layout so a refactor that shifts the buffer (e.g. wrong
+    // concat order or wrong flag value) is caught here before it fails
+    // on-chain with an opaque Crypto/InvalidInput error.
+    const { privateKey } = generateP256Keypair();
+    const assertion = signChallengeWithEmailWallet(privateKey, Buffer.alloc(32), 'localhost', 'http://localhost:3000');
+    const ad = Buffer.from(assertion.authenticatorDataHex, 'hex');
+
+    expect(ad.byteLength).toBe(37); // 32 (rpIdHash) + 1 (flags) + 4 (signCount)
+    const expectedRpIdHash = createHash('sha256').update('localhost').digest();
+    expect(ad.subarray(0, 32)).toEqual(expectedRpIdHash);
+    expect(ad[32]).toBe(0x05); // UP (0x01) | UV (0x04)
+    expect(ad.readUInt32BE(33)).toBe(0); // signCount is always 0 (not tracked)
+  });
+
+  it('origin is set in clientDataJson — must match the factory pinned origin or OriginMismatch', () => {
+    const { privateKey } = generateP256Keypair();
+    const origin = 'https://app.example.com';
+    const assertion = signChallengeWithEmailWallet(privateKey, Buffer.alloc(32), 'example.com', origin);
+    const clientData = JSON.parse(Buffer.from(assertion.clientDataJsonBase64, 'base64').toString('utf8'));
+
+    expect(clientData.origin).toBe(origin);
+    expect(clientData.crossOrigin).toBe(false);
+  });
+
   it('signature is always low-S (the contract traps on high-S)', () => {
     const N = 0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551n;
     for (let i = 0; i < 25; i++) {

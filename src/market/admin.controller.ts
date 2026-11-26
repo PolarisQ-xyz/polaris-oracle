@@ -1,13 +1,26 @@
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Logger, Query, UseGuards } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AdminGuard } from './admin.guard';
 import { MarketRepository } from './market.repository';
+import { MarketFactoryService } from './market-factory.service';
 import { PerpetualRepository } from './perpetual.repository';
 import { EmailAuthRepository } from './email-auth.repository';
 import { AdminActivityRepository } from './admin-activity.repository';
 import { StellarService } from './stellar.service';
+import { OracleService } from './oracle.service';
 
 const DEFAULT_LIST_LIMIT = 50;
+/** Default low-balance warning threshold: 10 XLM in stroops (issue #163). */
+const DEFAULT_ORACLE_MIN_BALANCE_STROOPS = 100_000_000n;
+
+function maskEmail(email: string): string {
+  const at = email.indexOf('@');
+  if (at <= 0) return '***';
+  const local = email.slice(0, at);
+  const domain = email.slice(at);
+  const visible = local.slice(0, 1);
+  return `${visible}***${domain}`;
+}
 
 /**
  * The admin dashboard's read API — everything here is `AdminGuard`-gated
@@ -22,13 +35,17 @@ const DEFAULT_LIST_LIMIT = 50;
 @Controller('admin')
 @UseGuards(AdminGuard)
 export class AdminController {
+  private readonly logger = new Logger(AdminController.name);
+
   constructor(
     private readonly config: ConfigService,
     private readonly markets: MarketRepository,
+    private readonly factory: MarketFactoryService,
     private readonly perpetuals: PerpetualRepository,
     private readonly emailWallets: EmailAuthRepository,
     private readonly activity: AdminActivityRepository,
     private readonly stellar: StellarService,
+    private readonly oracle: OracleService,
   ) {}
 
   @Get('overview')
@@ -45,7 +62,7 @@ export class AdminController {
     // Kept separate from `marketsByStatus` rather than merged into one
     // grouping — a perpetual's `WatchedPerpetualStatus` ('watching' |
     // 'terminated') isn't the same status space as a classic market's
-    // ('watching' | 'settling' | 'settled' | 'cancelling' | 'cancelled' |
+    // ('watching' | 'settled' | 'cancelled' |
     // 'pending'), so combining them would either collide 'watching'
     // across two different meanings or need namespacing either way — a
     // separate top-level field is the honest shape, matching this round's
@@ -65,6 +82,7 @@ export class AdminController {
       vaultBalanceStroops,
       totalWalletActions: this.activity.countWalletActions(),
       settlementChecksByOutcome: this.activity.countSettlementChecksByOutcome(),
+      factoryPaused: this.factory.isPaused(),
     };
   }
 
@@ -97,6 +115,11 @@ export class AdminController {
         contractId,
         stroops: stroops.toString(),
       })),
+      // sampleSize counts ALL buy/sell rows, including those whose fee data
+      // was null and therefore skipped from the totals above.  This is
+      // intentional: the number tells the dashboard "this is how many trades
+      // the estimate is drawn from," and knowing a row existed but lacked fee
+      // data is itself useful signal (it shows the estimate may be low).
       sampleSize: rows.length,
     };
   }
@@ -132,7 +155,9 @@ export class AdminController {
   wallets() {
     const passkeyAddresses = this.activity.getDistinctWalletAddresses();
     const emailWallets = this.emailWallets.getAllWallets().map((w) => ({
-      email: w.email,
+      // Mask the email (j***@example.com) to minimise exposure in dashboard
+      // screenshots and browser dev-tools. Full emails remain in the DB for ops.
+      email: maskEmail(w.email),
       address: w.address,
       createdAt: w.created_at,
       // Deliberately not returning encrypted_private_key/public_key_hex —
@@ -142,13 +167,42 @@ export class AdminController {
     return { passkeyAddressesSeen: passkeyAddresses, emailWallets };
   }
 
+  /**
+   * Returns live Stellar network health merged with deployed contract addresses,
+   * WASM hashes, and oracle/deployer public keys — aggregated from StellarService
+   * and ConfigService so the dashboard has a single endpoint for infrastructure status.
+   */
   @Get('network')
   async network() {
-    const health = await this.stellar.getNetworkHealth();
+    const minBalanceStroops =
+      BigInt(this.config.get<string>('oracleMinBalanceStroops') ?? DEFAULT_ORACLE_MIN_BALANCE_STROOPS);
+
+    const [health, oracleBalanceStroops, deployerBalanceStroops] = await Promise.all([
+      this.stellar.getNetworkHealth(),
+      this.stellar.getAccountXlmBalanceStroops(this.stellar.oraclePublicKey),
+      this.stellar.getAccountXlmBalanceStroops(this.stellar.deployerPublicKey),
+    ]);
+
+    if (oracleBalanceStroops !== null && oracleBalanceStroops < minBalanceStroops) {
+      this.logger.warn(
+        { oraclePublicKey: this.stellar.oraclePublicKey, oracleBalanceStroops: oracleBalanceStroops.toString(), minBalanceStroops: minBalanceStroops.toString() },
+        'Oracle hot-wallet XLM balance is below the minimum threshold — trades and settlement will fail when it drains',
+      );
+    }
+    if (deployerBalanceStroops !== null && deployerBalanceStroops < minBalanceStroops) {
+      this.logger.warn(
+        { deployerPublicKey: this.stellar.deployerPublicKey, deployerBalanceStroops: deployerBalanceStroops.toString(), minBalanceStroops: minBalanceStroops.toString() },
+        'Deployer hot-wallet XLM balance is below the minimum threshold',
+      );
+    }
+
     return {
       ...health,
+      oracleStatus: this.oracle.status,
       oraclePublicKey: this.stellar.oraclePublicKey,
+      oracleBalanceStroops: oracleBalanceStroops?.toString() ?? null,
       deployerPublicKey: this.stellar.deployerPublicKey,
+      deployerBalanceStroops: deployerBalanceStroops?.toString() ?? null,
       contracts: {
         vaultContract: this.config.get<string>('vaultContract'),
         lazerContract: this.config.get<string>('lazerContract'),
@@ -176,9 +230,26 @@ export class AdminController {
   settlementChecks(@Query('limit') limit?: string) {
     return { checks: this.activity.getRecentSettlementChecks(parseLimit(limit)) };
   }
+
+  @Get('factory')
+  factory(@Query('limit') limit?: string) {
+    return {
+      recentRuns: this.markets.getRecentFactoryRuns(parseLimit(limit)),
+      lastSuccessPerFeed: this.markets.getLastSuccessPerFeed(),
+    };
+  }
 }
 
 function parseLimit(raw: string | undefined): number {
   const n = Number(raw);
   return Number.isInteger(n) && n > 0 && n <= 500 ? n : DEFAULT_LIST_LIMIT;
+}
+
+function maskEmail(email: string): string {
+  const at = email.indexOf('@');
+  if (at <= 0) return '***';
+  const local = email.slice(0, at);
+  const domain = email.slice(at);
+  const visible = local.slice(0, 1);
+  return `${visible}***${domain}`;
 }

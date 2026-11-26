@@ -174,6 +174,7 @@ header.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
+| `GET` | `/wallets/balance?address=` | — | USDC and XLM balances for a wallet address |
 | `GET` | `/wallets/resolve?publicKeyHex=` | — | The address a passkey would deploy to |
 | `POST` | `/wallets/deploy` | — | Gasless smart-wallet deploy |
 | `POST` | `/wallets/tx/prepare` | — | Step 1 of the sponsored-relay: build the auth entry to sign |
