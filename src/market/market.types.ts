@@ -1,4 +1,4 @@
-export type TrackedStatus = 'watching' | 'settling' | 'settled' | 'cancelling' | 'cancelled' | 'pending';
+export type TrackedStatus = 'watching' | 'settled' | 'cancelled' | 'pending';
 
 export interface WatchedMarket {
   contractId: string;

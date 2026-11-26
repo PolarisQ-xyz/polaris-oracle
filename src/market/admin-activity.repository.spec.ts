@@ -1,14 +1,10 @@
-import { ConfigService } from '@nestjs/config';
+import { openDatabase } from './database.provider';
 import { AdminActivityRepository } from './admin-activity.repository';
-
-function makeConfig() {
-  return { get: () => './data/markets.db' } as unknown as ConfigService;
-}
 
 describe('AdminActivityRepository', () => {
   describe('wallet_actions', () => {
     it('round-trips a recorded action', () => {
-      const repo = new AdminActivityRepository(':memory:', makeConfig());
+      const repo = new AdminActivityRepository(openDatabase(':memory:'));
       repo.recordWalletAction({
         contractId: 'CMARKET1',
         walletAddress: 'CWALLET1',
@@ -33,7 +29,7 @@ describe('AdminActivityRepository', () => {
     });
 
     it('stores null collateral_amount/fee_bps for actions that never take a fee (e.g. transfer)', () => {
-      const repo = new AdminActivityRepository(':memory:', makeConfig());
+      const repo = new AdminActivityRepository(openDatabase(':memory:'));
       repo.recordWalletAction({
         contractId: 'CMARKET1',
         walletAddress: 'CWALLET1',
@@ -48,7 +44,7 @@ describe('AdminActivityRepository', () => {
     });
 
     it('getWalletActionsByFunction filters to exactly the requested functions — the fee-revenue query depends on this excluding split/merge/redeem/transfer', () => {
-      const repo = new AdminActivityRepository(':memory:', makeConfig());
+      const repo = new AdminActivityRepository(openDatabase(':memory:'));
       const base = { contractId: 'C1', walletAddress: 'W1', collateralAmount: '100', feeBps: 100, txHash: 'T' };
       repo.recordWalletAction({ ...base, functionName: 'buy', source: 'passkey' });
       repo.recordWalletAction({ ...base, functionName: 'sell', source: 'passkey' });
@@ -60,7 +56,7 @@ describe('AdminActivityRepository', () => {
     });
 
     it('getDistinctWalletAddresses de-duplicates across multiple actions from the same wallet', () => {
-      const repo = new AdminActivityRepository(':memory:', makeConfig());
+      const repo = new AdminActivityRepository(openDatabase(':memory:'));
       const base = { contractId: 'C1', collateralAmount: '100', feeBps: 100, functionName: 'buy' as const, source: 'passkey' as const };
       repo.recordWalletAction({ ...base, walletAddress: 'WALLET_A', txHash: 'T1' });
       repo.recordWalletAction({ ...base, walletAddress: 'WALLET_A', txHash: 'T2' });
@@ -70,7 +66,7 @@ describe('AdminActivityRepository', () => {
     });
 
     it('countWalletActions counts every row regardless of function', () => {
-      const repo = new AdminActivityRepository(':memory:', makeConfig());
+      const repo = new AdminActivityRepository(openDatabase(':memory:'));
       repo.recordWalletAction({
         contractId: 'C1',
         walletAddress: 'W1',
@@ -86,7 +82,7 @@ describe('AdminActivityRepository', () => {
 
   describe('vault_flows', () => {
     it('round-trips a recorded withdrawal, newest first', () => {
-      const repo = new AdminActivityRepository(':memory:', makeConfig());
+      const repo = new AdminActivityRepository(openDatabase(':memory:'));
       repo.recordVaultFlow({ vaultContractId: 'CVAULT', amountStroops: '1000000000', marketContractId: 'CM1', txHash: 'T1' });
       repo.recordVaultFlow({ vaultContractId: 'CVAULT', amountStroops: '2000000000', marketContractId: 'CM2', txHash: 'T2' });
 
@@ -98,7 +94,7 @@ describe('AdminActivityRepository', () => {
 
   describe('settlement_checks', () => {
     it('round-trips a passing check with real prices', () => {
-      const repo = new AdminActivityRepository(':memory:', makeConfig());
+      const repo = new AdminActivityRepository(openDatabase(':memory:'));
       repo.recordSettlementCheck({
         marketContractId: 'CM1',
         lazerPriceCents: 16n,
@@ -119,7 +115,7 @@ describe('AdminActivityRepository', () => {
     });
 
     it('stores null prices/divergence for a skipped check (e.g. feed not in catalog)', () => {
-      const repo = new AdminActivityRepository(':memory:', makeConfig());
+      const repo = new AdminActivityRepository(openDatabase(':memory:'));
       repo.recordSettlementCheck({
         marketContractId: 'CM1',
         lazerPriceCents: undefined,
@@ -139,7 +135,7 @@ describe('AdminActivityRepository', () => {
     });
 
     it('countSettlementChecksByOutcome buckets correctly and zero-fills outcomes never seen', () => {
-      const repo = new AdminActivityRepository(':memory:', makeConfig());
+      const repo = new AdminActivityRepository(openDatabase(':memory:'));
       repo.recordSettlementCheck({
         marketContractId: 'CM1',
         lazerPriceCents: 16n,
