@@ -1,9 +1,6 @@
-import { Inject, Injectable, OnModuleDestroy } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { Inject, Injectable } from '@nestjs/common';
 import Database from 'better-sqlite3';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { MARKETS_DB_PATH } from './market.repository';
+import { DATABASE } from './database.provider';
 
 export interface OddsSnapshotRow {
   yesBps: number;
@@ -22,16 +19,8 @@ export interface OddsSnapshotRow {
  * caller shows no change, never a wrong one.
  */
 @Injectable()
-export class OddsSnapshotRepository implements OnModuleDestroy {
-  private readonly db: Database.Database;
-
-  constructor(@Inject(MARKETS_DB_PATH) dbPath: string, config: ConfigService) {
-    const path = dbPath ?? config.get<string>('marketsDbFile') ?? './data/markets.db';
-    if (path !== ':memory:') {
-      mkdirSync(dirname(path), { recursive: true });
-    }
-    this.db = new Database(path);
-    this.db.pragma('journal_mode = WAL');
+export class OddsSnapshotRepository {
+  constructor(@Inject(DATABASE) private readonly db: Database.Database) {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS odds_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,9 +54,5 @@ export class OddsSnapshotRepository implements OnModuleDestroy {
   /** Bounds table growth for a long-running deployment — no market or perpetual in this system runs longer than a few days (expiry + grace period), so anything older than that is dead weight, never a value any caller still reads. */
   pruneOlderThan(cutoffMs: number): void {
     this.db.prepare(`DELETE FROM odds_snapshots WHERE captured_at < ?`).run(cutoffMs);
-  }
-
-  onModuleDestroy(): void {
-    this.db.close();
   }
 }
