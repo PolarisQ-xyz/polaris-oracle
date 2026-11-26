@@ -1,5 +1,6 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { SlidingWindowLimiter } from './sliding-window-limiter';
 
 const HOUR_MS = 60 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 10 * 60 * 1000;
@@ -44,15 +45,6 @@ export class WalletDeployRateLimiter implements OnModuleDestroy {
   }
 
   tryConsume(ip: string): boolean {
-    const max = this.config.get<number>('walletDeployMaxPerHour')!;
-    const now = Date.now();
-    const recent = (this.hits.get(ip) ?? []).filter((t) => now - t < HOUR_MS);
-    if (recent.length >= max) {
-      this.hits.set(ip, recent);
-      return false;
-    }
-    recent.push(now);
-    this.hits.set(ip, recent);
-    return true;
+    return this.limiter.tryConsume(ip);
   }
 }

@@ -1,5 +1,6 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { SlidingWindowLimiter } from './sliding-window-limiter';
 
 const HOUR_MS = 60 * 60 * 1000;
 const SWEEP_INTERVAL_MS = 10 * 60 * 1000;
@@ -43,18 +44,18 @@ export class FaucetService implements OnModuleDestroy {
 
   /** Returns true (and records the hit) if `address` is under the limit. */
   tryConsume(address: string): boolean {
-    const max = this.config.get<number>('faucetMaxPerHour')!;
-    const now = Date.now();
-    const recent = (this.hits.get(address) ?? []).filter((t) => now - t < HOUR_MS);
-    if (recent.length >= max) {
-      this.hits.set(address, recent);
-      return false;
-    }
-    recent.push(now);
-    this.hits.set(address, recent);
-    return true;
+    return this.limiter.tryConsume(address);
   }
 
+  /**
+   * Funds `address` via Stellar Friendbot. Must be called only after `tryConsume`
+   * succeeds; callers that skip the rate-limit check risk hammering Friendbot on
+   * every request. Returns `{ funded: true }` on success, `{ alreadyExists: true }`
+   * when the account already exists on testnet (Friendbot only creates new accounts),
+   * and throws on any other non-2xx response.
+   *
+   * Rate-limit design is tracked in issue #12.
+   */
   async fund(address: string): Promise<{ funded: boolean; alreadyExists: boolean }> {
     const friendbotUrl = this.config.get<string>('friendbotUrl')!;
     const res = await fetch(`${friendbotUrl}?addr=${encodeURIComponent(address)}`);

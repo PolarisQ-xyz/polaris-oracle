@@ -2,7 +2,7 @@ import { IsIn, IsInt, IsObject, IsOptional, IsString, Length, ValidateNested } f
 import { Type } from 'class-transformer';
 import { CONTRACT_KINDS, type ContractKind, type SponsorableFunction } from './prepare-auth.dto';
 
-const SPONSORABLE_FUNCTIONS = ['buy', 'sell', 'split', 'merge', 'transfer', 'redeem'] as const;
+import { SPONSORABLE_FUNCTIONS } from '../sponsorable-functions';
 
 class WebAuthnAssertionDto {
   @IsString()

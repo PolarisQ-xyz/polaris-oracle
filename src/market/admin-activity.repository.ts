@@ -1,9 +1,6 @@
-import { Inject, Injectable, OnModuleDestroy } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { Inject, Injectable } from '@nestjs/common';
 import Database from 'better-sqlite3';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { MARKETS_DB_PATH } from './market.repository';
+import { DATABASE } from './database.provider';
 
 export type WalletActionFunction = 'buy' | 'sell' | 'split' | 'merge' | 'redeem' | 'transfer' | 'terminate';
 export type WalletActionSource = 'passkey' | 'email' | 'admin';
@@ -36,8 +33,31 @@ export interface SettlementCheckRow {
   lazer_price_cents: string | null;
   hermes_price_cents: string | null;
   divergence_bps: number | null;
+  redstone_price_cents: string | null;
+  redstone_divergence_bps: number | null;
   outcome: SettlementCheckOutcome;
   reason: string | null;
+  created_at: number;
+}
+
+export interface SettlementAttemptRow {
+  id: number;
+  market_contract_id: string;
+  path: string;
+  attempt: number;
+  outcome: string;
+  error: string | null;
+  tx_hash: string | null;
+  created_at: number;
+}
+
+export interface AdminActionRow {
+  id: number;
+  action: string;
+  target_contract_id: string | null;
+  params_json: string | null;
+  result: string | null;
+  ip: string | null;
   created_at: number;
 }
 
@@ -56,16 +76,8 @@ export interface SettlementCheckRow {
  * connection to the same WAL-mode file is fine.
  */
 @Injectable()
-export class AdminActivityRepository implements OnModuleDestroy {
-  private readonly db: Database.Database;
-
-  constructor(@Inject(MARKETS_DB_PATH) dbPath: string, config: ConfigService) {
-    const path = dbPath ?? config.get<string>('marketsDbFile') ?? './data/markets.db';
-    if (path !== ':memory:') {
-      mkdirSync(dirname(path), { recursive: true });
-    }
-    this.db = new Database(path);
-    this.db.pragma('journal_mode = WAL');
+export class AdminActivityRepository {
+  constructor(@Inject(DATABASE) private readonly db: Database.Database) {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS wallet_actions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,11 +109,37 @@ export class AdminActivityRepository implements OnModuleDestroy {
         lazer_price_cents TEXT,
         hermes_price_cents TEXT,
         divergence_bps INTEGER,
+        redstone_price_cents TEXT,
+        redstone_divergence_bps INTEGER,
         outcome TEXT NOT NULL,
         reason TEXT,
         created_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_settlement_checks_created_at ON settlement_checks(created_at);
+
+      CREATE TABLE IF NOT EXISTS settlement_attempts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        market_contract_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        outcome TEXT NOT NULL,
+        error TEXT,
+        tx_hash TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_settlement_attempts_market ON settlement_attempts(market_contract_id);
+      CREATE INDEX IF NOT EXISTS idx_settlement_attempts_created_at ON settlement_attempts(created_at);
+
+      CREATE TABLE IF NOT EXISTS admin_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL,
+        target_contract_id TEXT,
+        params_json TEXT,
+        result TEXT,
+        ip TEXT,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_admin_actions_created_at ON admin_actions(created_at);
     `);
   }
 
@@ -146,19 +184,23 @@ export class AdminActivityRepository implements OnModuleDestroy {
     lazerPriceCents: bigint | undefined;
     hermesPriceCents: bigint | undefined;
     divergenceBps: number | undefined;
+    redstonePriceCents?: bigint | undefined;
+    redstoneDivergenceBps?: number | undefined;
     outcome: SettlementCheckOutcome;
     reason: string | undefined;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO settlement_checks (market_contract_id, lazer_price_cents, hermes_price_cents, divergence_bps, outcome, reason, created_at)
-         VALUES (@marketContractId, @lazerPriceCents, @hermesPriceCents, @divergenceBps, @outcome, @reason, @createdAt)`,
+        `INSERT INTO settlement_checks (market_contract_id, lazer_price_cents, hermes_price_cents, divergence_bps, redstone_price_cents, redstone_divergence_bps, outcome, reason, created_at)
+         VALUES (@marketContractId, @lazerPriceCents, @hermesPriceCents, @divergenceBps, @redstonePriceCents, @redstoneDivergenceBps, @outcome, @reason, @createdAt)`,
       )
       .run({
         marketContractId: check.marketContractId,
         lazerPriceCents: check.lazerPriceCents?.toString() ?? null,
         hermesPriceCents: check.hermesPriceCents?.toString() ?? null,
         divergenceBps: check.divergenceBps ?? null,
+        redstonePriceCents: check.redstonePriceCents?.toString() ?? null,
+        redstoneDivergenceBps: check.redstoneDivergenceBps ?? null,
         outcome: check.outcome,
         reason: check.reason ?? null,
         createdAt: Date.now(),
@@ -204,6 +246,54 @@ export class AdminActivityRepository implements OnModuleDestroy {
     const counts: Record<SettlementCheckOutcome, number> = { ok: 0, skipped: 0, failed: 0 };
     for (const row of rows) counts[row.outcome] = row.n;
     return counts;
+  }
+
+  recordSettlementAttempt(attempt: {
+    marketContractId: string;
+    path: 'lazer' | 'reflector' | 'cancel' | 'reconcile';
+    attempt: number;
+    outcome: 'success' | 'failure';
+    error?: string;
+    txHash?: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO settlement_attempts (market_contract_id, path, attempt, outcome, error, tx_hash, created_at)
+         VALUES (@marketContractId, @path, @attempt, @outcome, @error, @txHash, @createdAt)`,
+      )
+      .run({ ...attempt, error: attempt.error ?? null, txHash: attempt.txHash ?? null, createdAt: Date.now() });
+  }
+
+  getSettlementAttemptsByMarket(marketContractId: string): SettlementAttemptRow[] {
+    return this.db
+      .prepare(`SELECT * FROM settlement_attempts WHERE market_contract_id = ? ORDER BY created_at ASC`)
+      .all(marketContractId) as SettlementAttemptRow[];
+  }
+
+  recordAdminAction(action: {
+    action: string;
+    targetContractId?: string;
+    paramsJson?: string;
+    result?: string;
+    ip?: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO admin_actions (action, target_contract_id, params_json, result, ip, created_at)
+         VALUES (@action, @targetContractId, @paramsJson, @result, @ip, @createdAt)`,
+      )
+      .run({
+        action: action.action,
+        targetContractId: action.targetContractId ?? null,
+        paramsJson: action.paramsJson ?? null,
+        result: action.result ?? null,
+        ip: action.ip ?? null,
+        createdAt: Date.now(),
+      });
+  }
+
+  getRecentAdminActions(limit: number): AdminActionRow[] {
+    return this.db.prepare(`SELECT * FROM admin_actions ORDER BY created_at DESC LIMIT ?`).all(limit) as AdminActionRow[];
   }
 
   onModuleDestroy(): void {

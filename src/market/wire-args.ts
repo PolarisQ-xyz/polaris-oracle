@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { contract as StellarContract, type xdr } from '@stellar/stellar-sdk';
+import { SPONSORABLE_FUNCTIONS, type SponsorableFunction } from './sponsorable-functions';
 
 const SIGNED_INT_RE = /^-?\d+$/;
 const UNSIGNED_INT_RE = /^\d+$/;
@@ -38,7 +39,8 @@ export const AUTH_ADDRESS_PARAM: Record<string, string> = {
   transfer: 'from',
 };
 
-export const SPONSORABLE_FUNCTIONS = Object.keys(AUTH_ADDRESS_PARAM);
+export { SPONSORABLE_FUNCTIONS };
+export type { SponsorableFunction };
 
 /**
  * Which wire-arg key holds the amount `apply_fee` charges its bps against,
