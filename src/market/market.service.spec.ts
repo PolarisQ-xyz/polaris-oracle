@@ -363,6 +363,70 @@ describe('MarketService — settlement orchestration', () => {
       jest.useRealTimers();
     }
   });
+
+  describe('arm() dispatch branches', () => {
+    // Fixed wall clock so the seconds→ms conversion of expiry/gracePeriodSecs is asserted exactly.
+    const NOW_MS = 1_700_000_000_000;
+    const LAG_BUFFER_MS = 8_000; // mirrors LEDGER_LAG_BUFFER_MS in market.service.ts
+
+    function setup() {
+      jest.useFakeTimers();
+      jest.setSystemTime(NOW_MS);
+      const stellar = { settle: jest.fn(), cancel: jest.fn() };
+      const oracle = { isAvailable: true, waitForUpdate: jest.fn() };
+      const svc = new MarketService(makeRepo(), stellar as any, oracle as any, {} as ConfigService, new MarketEvents(), makeActivity());
+      const trySettle = jest.spyOn(svc as any, 'trySettle').mockResolvedValue(undefined);
+      const tryCancel = jest.spyOn(svc as any, 'tryCancel').mockResolvedValue(undefined);
+      return { svc, trySettle, tryCancel };
+    }
+
+    it('future expiry: arms a settle timer (expiry secs→ms + lag buffer) and calls nothing yet', async () => {
+      const { svc, trySettle, tryCancel } = setup();
+      try {
+        svc.watch(sample({ expiry: NOW_MS / 1000 + 100, gracePeriodSecs: 3600 }));
+
+        expect(trySettle).not.toHaveBeenCalled();
+        expect(tryCancel).not.toHaveBeenCalled();
+        expect(jest.getTimerCount()).toBe(1);
+
+        await jest.advanceTimersByTimeAsync(100_000 + LAG_BUFFER_MS - 1);
+        expect(trySettle).not.toHaveBeenCalled();
+
+        await jest.advanceTimersByTimeAsync(1);
+        expect(trySettle).toHaveBeenCalledTimes(1);
+        expect(tryCancel).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('1s past expiry, inside grace: calls trySettle immediately and arms no timer', () => {
+      const { svc, trySettle, tryCancel } = setup();
+      try {
+        svc.watch(sample({ expiry: NOW_MS / 1000 - 1, gracePeriodSecs: 60 }));
+
+        expect(trySettle).toHaveBeenCalledTimes(1);
+        expect(tryCancel).not.toHaveBeenCalled();
+        expect(jest.getTimerCount()).toBe(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it('past grace end: calls tryCancel immediately and never trySettle', () => {
+      const { svc, trySettle, tryCancel } = setup();
+      try {
+        // grace ended 1s ago: expiry 61s ago + 60s grace
+        svc.watch(sample({ expiry: NOW_MS / 1000 - 61, gracePeriodSecs: 60 }));
+
+        expect(tryCancel).toHaveBeenCalledTimes(1);
+        expect(trySettle).not.toHaveBeenCalled();
+        expect(jest.getTimerCount()).toBe(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
 });
 
 describe('MarketService — oracle cross-check', () => {
