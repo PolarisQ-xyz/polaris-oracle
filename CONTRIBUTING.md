@@ -38,45 +38,66 @@ npm test          # 130 unit tests
 npm run lint
 ```
 
-## Running against a local Stellar quickstart
+### Running against a local Stellar quickstart (no public testnet needed)
 
-By default `src/config/configuration.ts` points at public testnet
-(`soroban-testnet.stellar.org`, `friendbot.stellar.org`). Public testnet
-has rate limits, periodic resets, and flaky RPC — several bugs in this
-repo were originally testnet hiccups, not code bugs. For development work
-that touches Stellar transactions, use a local quickstart instead.
+The defaults in `src/config/configuration.ts` point at the public Stellar
+testnet. That means your dev loop depends on external RPC liveness, testnet
+resets, and real funded keys — a Friendbot request every restart. Use the
+`stellar/quickstart` Docker image instead: it spins up a local Horizon +
+RPC node with its own Friendbot, fast ledgers, and no rate limits.
 
-### Start a local quickstart node
+**1. Start the quickstart container**
 
 ```sh
 docker run --rm -it \
   -p 8000:8000 \
+  --name stellar-quickstart \
   stellar/quickstart:latest \
   --local \
-  --enable-soroban-rpc
+  --enable rpc
 ```
 
-This exposes:
-- Horizon: `http://localhost:8000`
-- Soroban RPC: `http://localhost:8000/soroban/rpc`
-- Friendbot: `http://localhost:8000/friendbot`
+Wait for `Stellar RPC running` in the logs (usually ~10 s).
 
-### Configure the server to use it
+**2. Deploy the contracts**
 
-Create a `.env` file (copy `.env.example`) and set:
+Clone [polaris-contracts](https://github.com/PolarisQ-xyz/polaris-contracts)
+and follow its README to deploy to `--network local`. The deploy script
+prints the contract IDs you need in the next step.
 
-```env
+**3. Configure the oracle**
+
+Create `.env.local` (or copy `.env.example` and edit):
+
+```sh
+STELLAR_RPC_URL=http://localhost:8000/soroban/rpc
 STELLAR_NETWORK=local
+STELLAR_NETWORK_PASSPHRASE="Standalone Network ; February 2017"
 HORIZON_URL=http://localhost:8000
-SOROBAN_RPC_URL=http://localhost:8000/soroban/rpc
 FRIENDBOT_URL=http://localhost:8000/friendbot
+
+# Paste the addresses the deploy script printed:
+VAULT_CONTRACT=CXXX...
+LAZER_CONTRACT=CXXX...
+# ... other contracts
+
+# Optional — omit to test the Reflector-only settle path
+# PYTH_LAZER_TOKEN=...
 ```
 
-The server will use these values in place of the testnet defaults. There
-is no reset risk, no rate limit, and no shared state with other
-contributors. Contract IDs from a local deployment are different from
-testnet ones, so update `VAULT_CONTRACT`, `LAZER_CONTRACT`, and
-`REFLECTOR_CONTRACT` to point at your locally-deployed instances.
+**4. Run the server**
+
+```sh
+NODE_ENV=development npx dotenv -e .env.local -- npm run start:dev
+```
+
+The server funds its own signer via the local Friendbot on startup, so no
+external key management is needed.
+
+**Tip**: the local ledger closes every ~5 s (configurable with
+`--protocol-version` flags on the container). Expiry timers fire faster
+than on testnet, so you can observe the full `watching → pending →
+settled/cancelled` lifecycle in a couple of minutes without waiting.
 
 ## Communication
 
