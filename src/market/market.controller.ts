@@ -23,6 +23,7 @@ import { CreateMarketDto } from './dto/create-market.dto';
 import { WatchMarketDto } from './dto/watch-market.dto';
 import { FaucetDto } from './dto/faucet.dto';
 import { OddsSnapshotRepository } from './odds-snapshot.repository';
+import { AdminActivityRepository } from './admin-activity.repository';
 
 @Controller('markets')
 export class MarketController {
@@ -33,18 +34,46 @@ export class MarketController {
     private readonly faucet: FaucetService,
     private readonly config: ConfigService,
     private readonly oddsSnapshots: OddsSnapshotRepository,
+    private readonly activity: AdminActivityRepository,
   ) {}
 
+  private validateId(id: string) {
+    if (id.length !== 56) {
+      throw new BadRequestException('id must be a 56‑character contract identifier');
+    }
+  }
+
+
   @Get()
-  list(@Query('feedId') feedId?: string) {
-    if (feedId === undefined) return this.markets.list();
-    const parsed = Number(feedId);
-    if (Number.isNaN(parsed)) throw new BadRequestException('feedId must be a number');
-    return this.markets.list(parsed);
+  list(
+    @Query('feedId') feedId?: string,
+    @Query('status') statusParam?: string,
+    @Query('limit') limitParam?: string,
+    @Query('before') before?: string,
+  ) {
+    // Legacy feedId path — kept for backward compatibility.
+    if (feedId !== undefined) {
+      const parsed = Number(feedId);
+      if (Number.isNaN(parsed)) throw new BadRequestException('feedId must be a number');
+      return this.markets.list(parsed);
+    }
+
+    // New paginated + filtered path.
+    if (statusParam !== undefined || limitParam !== undefined || before !== undefined) {
+      const status = statusParam ? statusParam.split(',').map((s) => s.trim()) : undefined;
+      const limit = limitParam !== undefined ? Number(limitParam) : 50;
+      if (Number.isNaN(limit) || limit < 1 || limit > 500) {
+        throw new BadRequestException('limit must be a number between 1 and 500');
+      }
+      return this.markets.listPaginated({ status, limit, before });
+    }
+
+    return this.markets.list();
   }
 
   @Get(':id')
   get(@Param('id') id: string) {
+    this.validateId(id);
     const m = this.markets.get(id);
     if (!m) throw new NotFoundException(`no tracked market ${id}`);
     return m;
@@ -52,6 +81,7 @@ export class MarketController {
 
   @Get(':id/state')
   async state(@Param('id') id: string) {
+    this.validateId(id);
     // getMarketState already returns a fully normalized (camelCase,
     // stringified bigints, unwrapped status) object — see StellarService's
     // normalizeMarket for why the raw contract.Spec decode needs that step.
@@ -60,6 +90,7 @@ export class MarketController {
 
   @Get(':id/position')
   async position(@Param('id') id: string, @Query('address') address: string) {
+    this.validateId(id);
     if (!address) throw new BadRequestException('address query param is required');
     if (!isValidStellarAddress(address)) throw new BadRequestException('address query param is not a valid Stellar address');
     const [yes, no] = await this.stellar.getPosition(id, address);
@@ -76,6 +107,7 @@ export class MarketController {
    */
   @Get(':id/price')
   async price(@Param('id') id: string) {
+    this.validateId(id);
     const current = await this.stellar.getPrice(id);
     const windowSecs = this.config.get<number>('oddsChangeWindowSecs')!;
     const past = this.oddsSnapshots.closestBefore(id, Date.now() - windowSecs * 1000);
@@ -87,6 +119,7 @@ export class MarketController {
 
   @Get(':id/fee')
   async fee(@Param('id') id: string) {
+    this.validateId(id);
     return { feeBps: await this.stellar.getFee(id) };
   }
 
@@ -138,6 +171,13 @@ export class MarketController {
       feedId,
     });
 
+    this.activity.recordAdminAction({
+      action: 'create',
+      targetContractId: contractId,
+      paramsJson: JSON.stringify(dto),
+      result: 'ok',
+    });
+
     return { ...watched, initTxHash };
   }
 
@@ -145,27 +185,33 @@ export class MarketController {
   @UseGuards(AdminGuard)
   @HttpCode(200)
   async runFactory() {
-    return this.factory.run();
+    const result = await this.factory.run();
+    this.activity.recordAdminAction({ action: 'factory/run', result: 'ok' });
+    return result;
   }
 
   @Post('watch')
   @UseGuards(AdminGuard)
   async watch(@Body() dto: WatchMarketDto) {
     const state = await this.stellar.getMarketState(dto.contractId);
-    return this.markets.watch({
+    const watched = this.markets.watch({
       contractId: dto.contractId,
       strikePriceCents: state.strikePrice,
       expiry: Number(state.expiry),
       gracePeriodSecs: Number(state.gracePeriod),
       feedId: state.feedId,
     });
+    this.activity.recordAdminAction({ action: 'watch', targetContractId: dto.contractId, result: 'ok' });
+    return watched;
   }
 
   @Post(':id/settle')
   @UseGuards(AdminGuard)
   @HttpCode(200)
   async settle(@Param('id') id: string) {
+    this.validateId(id);
     await this.markets.triggerSettle(id);
+    this.activity.recordAdminAction({ action: 'settle', targetContractId: id, result: 'ok' });
     return this.markets.get(id);
   }
 
@@ -173,7 +219,53 @@ export class MarketController {
   @UseGuards(AdminGuard)
   @HttpCode(200)
   async cancel(@Param('id') id: string) {
+    this.validateId(id);
     await this.markets.triggerCancel(id);
+    this.activity.recordAdminAction({ action: 'cancel', targetContractId: id, result: 'ok' });
     return this.markets.get(id);
+  }
+
+  // ── #179: factory pause / resume ──────────────────────────────────────────
+
+  @Post('factory/pause')
+  @UseGuards(AdminGuard)
+  @HttpCode(200)
+  pauseFactory() {
+    this.factory.pause();
+    return { paused: true };
+  }
+
+  @Post('factory/resume')
+  @UseGuards(AdminGuard)
+  @HttpCode(200)
+  resumeFactory() {
+    this.factory.resume();
+    return { paused: false };
+  }
+
+  // ── #180: bulk pending retry ───────────────────────────────────────────────
+
+  @Post('pending/retry')
+  @UseGuards(AdminGuard)
+  @HttpCode(200)
+  async retryPending() {
+    const pending = this.markets.listPaginated({ status: ['pending'], limit: 500 });
+    const results: { contractId: string; outcome: string; error?: string }[] = [];
+    const now = Date.now();
+    for (const m of pending) {
+      try {
+        const pastGrace = (m.expiry + m.gracePeriodSecs) * 1000 < now;
+        if (pastGrace) {
+          await this.markets.triggerCancel(m.contractId);
+          results.push({ contractId: m.contractId, outcome: 'cancel' });
+        } else {
+          await this.markets.triggerSettle(m.contractId);
+          results.push({ contractId: m.contractId, outcome: 'settle' });
+        }
+      } catch (err) {
+        results.push({ contractId: m.contractId, outcome: 'error', error: (err as Error).message });
+      }
+    }
+    return { processed: results.length, results };
   }
 }

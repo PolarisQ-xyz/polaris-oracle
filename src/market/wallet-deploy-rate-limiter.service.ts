@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { SlidingWindowLimiter } from './sliding-window-limiter';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -16,20 +17,14 @@ const HOUR_MS = 60 * 60 * 1000;
  */
 @Injectable()
 export class WalletDeployRateLimiter {
-  private readonly hits = new Map<string, number[]>();
+  private readonly limiter = new SlidingWindowLimiter(
+    () => this.config.get<number>('walletDeployMaxPerHour')!,
+    HOUR_MS,
+  );
 
   constructor(private readonly config: ConfigService) {}
 
   tryConsume(ip: string): boolean {
-    const max = this.config.get<number>('walletDeployMaxPerHour')!;
-    const now = Date.now();
-    const recent = (this.hits.get(ip) ?? []).filter((t) => now - t < HOUR_MS);
-    if (recent.length >= max) {
-      this.hits.set(ip, recent);
-      return false;
-    }
-    recent.push(now);
-    this.hits.set(ip, recent);
-    return true;
+    return this.limiter.tryConsume(ip);
   }
 }
